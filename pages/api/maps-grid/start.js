@@ -1,5 +1,5 @@
 // pages/api/maps-grid/start.js
-import { buildGrid } from "../../../../lib/geo";
+import { buildGrid } from "../../../lib/geo";
 
 const DFS_BASE = "https://api.dataforseo.com/v3";
 
