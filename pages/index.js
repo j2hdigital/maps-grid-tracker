@@ -3,15 +3,15 @@ import { useState, useMemo, useEffect } from "react";
 
 export default function Home() {
   const [keyword, setKeyword] = useState("plumber");
-  const [centerLat, setCenterLat] = useState(41.671);
+  const [centerLat, setCenterLat] = useState(41.671);     // change to your test area
   const [centerLng, setCenterLng] = useState(-73.12);
-  const [gridSize, setGridSize] = useState(9);       // odd: 5/7/9
-  const [spacingM, setSpacingM] = useState(500);     // meters
+  const [gridSize, setGridSize] = useState(9);            // odd: 5/7/9
+  const [spacingM, setSpacingM] = useState(500);          // meters between cells
   const [zoom, setZoom] = useState("15z");
   const [language, setLanguage] = useState("en");
-  const [device, setDevice] = useState("desktop");
-  const [targetName, setTargetName] = useState("");   // optional
-  const [targetPlace, setTargetPlace] = useState(""); // optional
+  const [device, setDevice] = useState("desktop");        // desktop returns up to 100 results; mobile ~20
+  const [targetName, setTargetName] = useState("");       // optional fallback match
+  const [targetPlace, setTargetPlace] = useState("");     // best: exact Google place_id
 
   const [cells, setCells] = useState([]);
   const [ids, setIds] = useState([]);
@@ -23,12 +23,12 @@ export default function Home() {
   const field = { width: "100%", padding: 8, border: "1px solid #d1d5db", borderRadius: 8 };
 
   function colorFor(rank) {
-    if (rank === "pending") return "#cbd5e1"; // slate-300
-    if (rank == null) return "#9ca3af";       // gray-400
-    if (rank <= 3) return "#22c55e";          // green-500
-    if (rank <= 10) return "#eab308";         // yellow-500
-    if (rank <= 20) return "#f97316";         // orange-500
-    return "#ef4444";                          // red-500
+    if (rank === "pending") return "#cbd5e1";
+    if (rank == null) return "#9ca3af";
+    if (rank <= 3) return "#22c55e";
+    if (rank <= 10) return "#eab308";
+    if (rank <= 20) return "#f97316";
+    return "#ef4444";
   }
 
   async function startGrid(e) {
@@ -36,30 +36,31 @@ export default function Home() {
     setLoading(true);
     setCells([]); setIds([]); setRanks({}); setProgress({ done: 0, total: 0 });
 
-    const r = await fetch("/api/maps-grid/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        keyword,
-        centerLat: Number(centerLat),
-        centerLng: Number(centerLng),
-        gridSize: Number(gridSize),
-        spacingM: Number(spacingM),
-        language_code: language,
-        device,
-        zoom
-      })
-    });
-    const j = await r.json();
-    if (!r.ok || !j.ok) {
-      alert("Start failed: " + (j.error || r.statusText));
+    try {
+      const r = await fetch("/api/maps-grid/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keyword,
+          centerLat: Number(centerLat),
+          centerLng: Number(centerLng),
+          gridSize: Number(gridSize),
+          spacingM: Number(spacingM),
+          language_code: language,
+          device,
+          zoom
+        })
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Start failed");
+      setCells(j.cells || []);
+      setIds(j.ids || []);
+      setRanks(Object.fromEntries((j.ids || []).map(id => [id, "pending"])));
+      setProgress({ done: 0, total: (j.ids || []).length });
+    } catch (err) {
+      alert(err.message);
       setLoading(false);
-      return;
     }
-    setCells(j.cells || []);
-    setIds(j.ids || []);
-    setRanks(Object.fromEntries((j.ids || []).map(id => [id, "pending"])));
-    setProgress({ done: 0, total: (j.ids || []).length });
   }
 
   // Poll loop
@@ -69,37 +70,39 @@ export default function Home() {
 
     async function poll() {
       if (stop) return;
-      const r = await fetch("/api/maps-grid/poll", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ids,
-          target: {
-            place_id: targetPlace.trim() || undefined,
-            name: targetName.trim() || undefined
-          }
-        })
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) {
+      try {
+        const r = await fetch("/api/maps-grid/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ids,
+            target: {
+              place_id: targetPlace.trim() || undefined,
+              name: targetName.trim() || undefined
+            }
+          })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error("Poll failed");
+
+        const next = { ...ranks };
+        let done = 0;
+        for (const row of j.results || []) {
+          if (row.status === "ok") next[row.id] = row.rank;         // number or null
+          else if (row.status === "pending") next[row.id] = "pending";
+          else next[row.id] = null;
+        }
+        for (const id of ids) if (next[id] !== "pending") done++;
+        setRanks(next);
+        setProgress({ done, total: ids.length });
+
+        if (done < ids.length) setTimeout(poll, 2500);
+        else setLoading(false);
+      } catch {
         setTimeout(poll, 2500);
-        return;
       }
-
-      const next = { ...ranks };
-      let done = 0;
-      for (const row of j.results || []) {
-        if (row.status === "ok") next[row.id] = row.rank;
-        else if (row.status === "pending") next[row.id] = "pending";
-        else next[row.id] = null;
-      }
-      for (const id of ids) if (next[id] !== "pending") done++;
-      setRanks(next);
-      setProgress({ done, total: ids.length });
-
-      if (done < ids.length) setTimeout(poll, 2500);
-      else setLoading(false);
     }
+
     poll();
     return () => { stop = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -113,7 +116,7 @@ export default function Home() {
   return (
     <div style={{ maxWidth: 980, margin: "24px auto", padding: "0 12px", fontFamily: "system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial" }}>
       <h1 style={{ margin: 0, fontSize: 22 }}>Google Maps Grid Rank Tracker</h1>
-      <p style={{ marginTop: 6, color: "#475569" }}>Separate project • powered by DataForSEO</p>
+      <p style={{ marginTop: 6, color: "#475569" }}>Powered by DataForSEO • One SERP task per grid cell</p>
 
       <form onSubmit={startGrid} style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, border: "1px solid #e5e7eb", borderRadius: 10, padding: 12, marginTop: 10 }}>
         <div><label>Keyword</label><input value={keyword} onChange={e=>setKeyword(e.target.value)} style={field} /></div>
@@ -144,14 +147,13 @@ export default function Home() {
       <div style={{ marginTop: 16, display:"grid", gridTemplateColumns: gridTemplate, gap: 6, alignItems:"center", justifyItems:"center" }}>
         {tiles.map((t, i) => (
           <div key={t.id || i}
-            title={`(${t.row+1},${t.col+1})  ${t.lat},${t.lng}  rank: ${t.rank ?? "—"}`}
-            style={{
-              width:36, height:36, borderRadius:6,
-              background: colorFor(t.rank), color:"#111", fontSize:12,
-              display:"flex", alignItems:"center", justifyContent:"center",
-              border:"1px solid rgba(0,0,0,0.08)"
-            }}
-          >
+               title={`(${t.row+1},${t.col+1})  ${t.lat},${t.lng}  rank: ${t.rank ?? "—"}`}
+               style={{
+                 width:36, height:36, borderRadius:6,
+                 background: colorFor(t.rank), color:"#111", fontSize:12,
+                 display:"flex", alignItems:"center", justifyContent:"center",
+                 border:"1px solid rgba(0,0,0,0.08)"
+               }}>
             {t.rank === "pending" ? "…" : (t.rank ?? "—")}
           </div>
         ))}
@@ -159,4 +161,3 @@ export default function Home() {
     </div>
   );
 }
-
