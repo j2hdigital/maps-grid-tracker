@@ -1,9 +1,14 @@
 // pages/index.js
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Head from "next/head";
 
 export default function Home() {
-  // --- form state ---
+  // --- locate business by NAME ---
+  const [bizName, setBizName] = useState("Your Business Name");
+  const [cityText, setCityText] = useState("Torrington, CT");
+  const [resolved, setResolved] = useState(null); // {place_id,name,lat,lng,address}
+
+  // --- grid params ---
   const [keyword, setKeyword] = useState("plumber");
   const [centerLat, setCenterLat] = useState(41.671);
   const [centerLng, setCenterLng] = useState(-73.12);
@@ -12,8 +17,6 @@ export default function Home() {
   const [zoom, setZoom] = useState("15z");
   const [language, setLanguage] = useState("en");
   const [device, setDevice] = useState("desktop");
-  const [targetName, setTargetName] = useState("");
-  const [targetPlace, setTargetPlace] = useState("");
 
   // --- job state ---
   const [cells, setCells] = useState([]);
@@ -22,107 +25,120 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 
-  // ---- Leaflet refs ----
+  // --- Google Map ---
+  const mapDiv = useRef(null);
   const mapRef = useRef(null);
-  const layerRef = useRef(null);
+  const markersRef = useRef([]);
 
-  // CDN-loaded Leaflet will attach window.L
-  const Lready = typeof window !== "undefined" && typeof window.L !== "undefined";
+  const colorFor = (rank) => {
+    if (rank === "pending") return "#94a3b8";
+    if (rank == null) return "#9ca3af";
+    if (rank <= 3) return "#22c55e";
+    if (rank <= 10) return "#eab308";
+    if (rank <= 20) return "#f97316";
+    return "#ef4444";
+  };
 
-  // color + size
-  function colorFor(rank) {
-    if (rank === "pending") return "#94a3b8"; // slate-400
-    if (rank == null) return "#9ca3af";       // gray-400
-    if (rank <= 3) return "#22c55e";          // green-500
-    if (rank <= 10) return "#eab308";         // yellow-500
-    if (rank <= 20) return "#f97316";         // orange-500
-    return "#ef4444";                         // red-500
-  }
-
-  // Init Leaflet map once
+  // load Google Maps JS
   useEffect(() => {
-    if (!Lready || mapRef.current) return;
-    const L = window.L;
+    if (typeof window === "undefined") return;
+    if (window.google?.maps) return; // already loaded
+    const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+    const s = document.createElement("script");
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${key}`;
+    s.async = true;
+    document.head.appendChild(s);
+  }, []);
 
-    const map = L.map("gridmap", { zoomControl: true });
-    map.setView([Number(centerLat) || 0, Number(centerLng) || 0], 12);
-
-    L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { maxZoom: 19, attribution: "&copy; OpenStreetMap" }
-    ).addTo(map);
-
-    const layer = L.layerGroup().addTo(map);
-    mapRef.current = map;
-    layerRef.current = layer;
-
-    // Resize observer to keep map sized
-    setTimeout(() => map.invalidateSize(), 300);
-  }, [Lready]);
-
-  // Re-center map when user changes the center
+  // init map
   useEffect(() => {
-    if (!mapRef.current) return;
-    mapRef.current.setView([Number(centerLat) || 0, Number(centerLng) || 0], 12);
+    if (!mapDiv.current || !window.google?.maps || mapRef.current) return;
+    mapRef.current = new window.google.maps.Map(mapDiv.current, {
+      center: { lat: Number(centerLat), lng: Number(centerLng) },
+      zoom: 12,
+      mapTypeControl: false,
+      streetViewControl: false,
+      fullscreenControl: false,
+    });
   }, [centerLat, centerLng]);
 
-  // Draw / update markers whenever results change
-  const tiles = useMemo(() => {
-    if (!cells.length || !ids.length) return [];
-    return cells.map((cell, idx) => ({ ...cell, id: ids[idx], rank: ranks[ids[idx]] }));
+  // recenter
+  useEffect(() => {
+    if (mapRef.current) {
+      mapRef.current.setCenter({ lat: Number(centerLat), lng: Number(centerLng) });
+    }
+  }, [centerLat, centerLng]);
+
+  // draw grid markers
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const g = window.google.maps;
+    // clear old
+    markersRef.current.forEach(m => m.setMap(null));
+    markersRef.current = [];
+
+    if (!cells.length || !ids.length) return;
+
+    const bounds = new g.LatLngBounds();
+    cells.forEach((cell, idx) => {
+      const id = ids[idx];
+      const rank = ranks[id];
+      const color = colorFor(rank);
+      const label = rank === "pending" ? "…" : (rank ?? "–").toString();
+
+      const marker = new g.Marker({
+        position: { lat: cell.lat, lng: cell.lng },
+        map: mapRef.current,
+        icon: {
+          path: g.SymbolPath.CIRCLE,
+          fillColor: color,
+          fillOpacity: 1,
+          strokeColor: "rgba(0,0,0,0.25)",
+          strokeWeight: 1.5,
+          scale: 12, // ~ px radius
+          labelOrigin: new g.Point(0, -0.5)
+        },
+        label: { text: label, color: "#111", fontWeight: "700", fontSize: "12px" },
+        title: `(${cell.row+1},${cell.col+1}) ${cell.lat}, ${cell.lng} • rank: ${rank ?? "—"}`
+      });
+      markersRef.current.push(marker);
+      bounds.extend(marker.getPosition());
+    });
+    if (!bounds.isEmpty()) mapRef.current.fitBounds(bounds, 60);
   }, [cells, ids, ranks]);
 
-  useEffect(() => {
-    if (!Lready || !layerRef.current) return;
-    const L = window.L;
-    const layer = layerRef.current;
-    layer.clearLayers();
-
-    // circle size in pixels (looks nice on all zooms)
-    const pxRadius = 16;
-
-    tiles.forEach(t => {
-      const html = `
-        <div class="rank-dot" style="
-          width:${pxRadius*2}px;height:${pxRadius*2}px;
-          background:${colorFor(t.rank)};
-          border-radius:999px;border:2px solid rgba(0,0,0,0.15);
-          display:flex;align-items:center;justify-content:center;
-          color:#111;font-weight:700;font-size:13px;
-          box-shadow:0 1px 3px rgba(0,0,0,0.15);
-        ">${t.rank === "pending" ? "…" : (t.rank ?? "–")}</div>
-      `;
-
-      const icon = L.divIcon({
-        html,
-        className: "rank-divicon",
-        iconSize: [pxRadius*2, pxRadius*2],
-        iconAnchor: [pxRadius, pxRadius]
+  // find business by NAME (no manual place_id)
+  async function resolveByName(e) {
+    e?.preventDefault?.();
+    try {
+      const r = await fetch("/api/place/resolve-by-name", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: bizName.trim(), locationText: cityText.trim(), radiusM: 25000 })
       });
-
-      const m = L.marker([t.lat, t.lng], { icon }).addTo(layer);
-      m.bindTooltip(
-        `(${t.row+1},${t.col+1}) • ${t.lat}, ${t.lng} • rank: ${t.rank ?? "—"}`,
-        { direction: "top", offset: [0, -pxRadius], sticky: true }
-      );
-    });
-
-    if (tiles.length && mapRef.current) {
-      const bounds = window.L.latLngBounds(tiles.map(t => [t.lat, t.lng]));
-      mapRef.current.fitBounds(bounds.pad(0.2));
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Resolve failed");
+      setResolved(j.best);
+      setCenterLat(j.best.lat);
+      setCenterLng(j.best.lng);
+      // use exact place_id for matching:
+      setDevice("desktop");
+      // keep your grid defaults or tweak here:
+    } catch (err) {
+      alert(err.message);
     }
-  }, [tiles, Lready]);
+  }
 
-  // Start → create DFS tasks
+  // start grid run (uses current center & params)
   async function startGrid(e) {
     e?.preventDefault?.();
     setLoading(true);
-    setCells([]); setIds([]); setRanks({}); setProgress({ done: 0, total: 0 });
+    setCells([]); setIds([]); setRanks({}); setProgress({ done:0, total:0 });
 
     try {
       const r = await fetch("/api/maps-grid/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
         body: JSON.stringify({
           keyword,
           centerLat: Number(centerLat),
@@ -146,12 +162,11 @@ export default function Home() {
     }
   }
 
-  // Poll → update ranks
+  // poll ranks (uses exact place_id if we’ve resolved the business)
   useEffect(() => {
     if (!ids.length) return;
     let stop = false;
-
-    async function poll() {
+    async function tick() {
       if (stop) return;
       try {
         const r = await fetch("/api/maps-grid/poll", {
@@ -160,51 +175,37 @@ export default function Home() {
           body: JSON.stringify({
             ids,
             target: {
-              place_id: targetPlace.trim() || undefined,
-              name: targetName.trim() || undefined
+              place_id: resolved?.place_id || undefined,
+              name: resolved?.name || undefined
             }
           })
         });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error("Poll failed");
-
-        const next = { ...ranks };
-        let done = 0;
+        const next = { ...ranks }; let done = 0;
         for (const row of j.results || []) {
           if (row.status === "ok") next[row.id] = row.rank;
           else if (row.status === "pending") next[row.id] = "pending";
           else next[row.id] = null;
         }
         for (const id of ids) if (next[id] !== "pending") done++;
-        setRanks(next);
-        setProgress({ done, total: ids.length });
-
-        if (done < ids.length) setTimeout(poll, 2200);
+        setRanks(next); setProgress({ done, total: ids.length });
+        if (done < ids.length) setTimeout(tick, 2200);
         else setLoading(false);
       } catch {
-        setTimeout(poll, 2500);
+        setTimeout(tick, 2500);
       }
     }
-
-    poll();
+    tick();
     return () => { stop = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids, targetName, targetPlace]);
+  }, [ids, resolved?.place_id]);
 
   const field = { width: "100%", padding: 8, border: "1px solid #d1d5db", borderRadius: 8 };
 
   return (
     <>
       <Head>
-        {/* Leaflet CDN */}
-        <link
-          rel="stylesheet"
-          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        />
-        <script
-          src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          defer
-        ></script>
         <title>Grid Rank Tracker</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
@@ -213,63 +214,45 @@ export default function Home() {
         {/* Sidebar */}
         <aside style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Maps Grid Rank Tracker</h2>
-          <p style={{ color: "#475569", marginTop: 6, marginBottom: 12 }}>
-            Enter your params, then click <b>Start Grid</b>. Use your exact <b>place_id</b> for best matching.
-          </p>
+          <p style={{ color: "#475569", marginTop: 6 }}>Find by <b>Business Name</b>, not place_id. Map = Google Maps.</p>
 
-          <form onSubmit={startGrid} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <div style={{ gridColumn: "1 / -1" }}>
-              <label>Keyword</label>
-              <input value={keyword} onChange={e=>setKeyword(e.target.value)} style={field} />
+          {/* Resolve by NAME */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:10, paddingTop:10, borderTop:"1px solid #e5e7eb" }}>
+            <div style={{ gridColumn:"1 / -1" }}><label>Business Name</label>
+              <input value={bizName} onChange={e=>setBizName(e.target.value)} style={field} placeholder="e.g., Acme Plumbing LLC" />
             </div>
+            <div style={{ gridColumn:"1 / -1" }}><label>City/State (bias)</label>
+              <input value={cityText} onChange={e=>setCityText(e.target.value)} style={field} placeholder="City, ST" />
+            </div>
+            <div style={{ gridColumn:"1 / -1", display:"flex", gap:8 }}>
+              <button type="button" onClick={resolveByName}
+                style={{ background:"#111", color:"#fff", border:0, borderRadius:10, padding:"8px 12px", cursor:"pointer", fontWeight:700 }}>
+                Find Business & Center Map
+              </button>
+              {resolved ? <span style={{ fontSize:12, color:"#475569" }}>Found: <b>{resolved.name}</b></span> : null}
+            </div>
+          </div>
 
-            <div>
-              <label>Center Lat</label>
-              <input value={centerLat} onChange={e=>setCenterLat(e.target.value)} style={field} />
+          {/* Grid params */}
+          <form onSubmit={startGrid} style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginTop:14 }}>
+            <div style={{ gridColumn:"1 / -1" }}>
+              <label>Keyword</label><input value={keyword} onChange={e=>setKeyword(e.target.value)} style={field} />
             </div>
-            <div>
-              <label>Center Lng</label>
-              <input value={centerLng} onChange={e=>setCenterLng(e.target.value)} style={field} />
-            </div>
-
-            <div>
-              <label>Grid Size</label>
-              <input type="number" min="3" step="2" value={gridSize} onChange={e=>setGridSize(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Spacing (m)</label>
-              <input type="number" min="100" step="50" value={spacingM} onChange={e=>setSpacingM(e.target.value)} style={field} />
-            </div>
-
-            <div>
-              <label>Language</label>
-              <input value={language} onChange={e=>setLanguage(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Device</label>
+            <div><label>Center Lat</label><input value={centerLat} onChange={e=>setCenterLat(e.target.value)} style={field} /></div>
+            <div><label>Center Lng</label><input value={centerLng} onChange={e=>setCenterLng(e.target.value)} style={field} /></div>
+            <div><label>Grid Size</label><input type="number" min="3" step="2" value={gridSize} onChange={e=>setGridSize(e.target.value)} style={field} /></div>
+            <div><label>Spacing (m)</label><input type="number" min="100" step="50" value={spacingM} onChange={e=>setSpacingM(e.target.value)} style={field} /></div>
+            <div><label>Zoom</label><input value={zoom} onChange={e=>setZoom(e.target.value)} style={field} /></div>
+            <div><label>Language</label><input value={language} onChange={e=>setLanguage(e.target.value)} style={field} /></div>
+            <div><label>Device</label>
               <select value={device} onChange={e=>setDevice(e.target.value)} style={field}>
                 <option value="desktop">desktop</option>
                 <option value="mobile">mobile</option>
               </select>
             </div>
-
-            <div>
-              <label>Zoom</label>
-              <input value={zoom} onChange={e=>setZoom(e.target.value)} style={field} />
-            </div>
-            <div></div>
-
-            <div style={{ gridColumn: "1 / -1" }}>
-              <label>Target Name (optional)</label>
-              <input value={targetName} onChange={e=>setTargetName(e.target.value)} style={field} />
-            </div>
-            <div style={{ gridColumn: "1 / -1" }}>
-              <label>Target place_id (best)</label>
-              <input value={targetPlace} onChange={e=>setTargetPlace(e.target.value)} style={field} />
-            </div>
-
-            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-              <button type="submit" disabled={loading} style={{ background:"#47943b", color:"#fff", border:0, borderRadius:10, padding:"10px 14px", cursor:"pointer", fontWeight:700 }}>
+            <div style={{ gridColumn:"1 / -1", display:"flex", gap:8, alignItems:"center" }}>
+              <button type="submit" disabled={loading}
+                style={{ background:"#47943b", color:"#fff", border:0, borderRadius:10, padding:"10px 14px", cursor:"pointer", fontWeight:700 }}>
                 {loading ? "Working…" : "Start Grid"}
               </button>
               <span style={{ fontSize:12, color:"#475569" }}>
@@ -293,10 +276,11 @@ export default function Home() {
         </aside>
 
         {/* Map */}
-        <main style={{ position: "relative" }}>
-          <div id="gridmap" style={{ position: "absolute", inset: 0 }} />
+        <main style={{ position:"relative" }}>
+          <div ref={mapDiv} style={{ position:"absolute", inset:0 }} />
         </main>
       </div>
     </>
   );
 }
+
