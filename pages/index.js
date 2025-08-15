@@ -7,6 +7,17 @@ export default function Home() {
   const [bizName, setBizName] = useState("Your Business Name");
   const [cityText, setCityText] = useState("Torrington, CT");
   const [resolved, setResolved] = useState(null); // {place_id,name,lat,lng,address}
+  
+  // NEW state for competitor list panel
+const [topItems, setTopItems] = useState([]);
+const [selectedTaskId, setSelectedTaskId] = useState(null);
+
+// Autocomplete instance reference
+const autoRef = useRef(null);
+
+// Snap toggle for centering
+const [snapToBusiness, setSnapToBusiness] = useState(true);
+
 
   // --- grid params ---
   const [keyword, setKeyword] = useState("plumber");
