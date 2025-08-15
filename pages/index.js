@@ -25,6 +25,15 @@ export default function Home() {
   const [ranks, setRanks] = useState({});
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  // under your other useState/useRef:
+const [mapsReady, setMapsReady] = useState(false); // you already added this earlier
+const placeInputRef = useRef(null);
+const autoRef = useRef(null);
+const acServiceRef = useRef(null);
+const placeServiceRef = useRef(null);
+const [preds, setPreds] = useState([]);     // prediction list for fallback
+const [predOpen, setPredOpen] = useState(false);
+
 
   // ---------- Competitor list panel ----------
   const [topItems, setTopItems] = useState([]);
@@ -68,35 +77,92 @@ export default function Home() {
   }, [centerLat, centerLng]);
 
   // Wire Google Places Autocomplete to the input
-  useEffect(() => {
-    if (!window.google?.maps?.places || !placeInputRef.current) return;
-    const g = window.google.maps;
+ useEffect(() => {
+  if (!mapsReady) return;
+  const g = window.google.maps;
+
+  // Try the standard widget first
+  if (placeInputRef.current && g.places?.Autocomplete) {
     const ac = new g.places.Autocomplete(placeInputRef.current, {
       fields: ["place_id", "name", "geometry", "formatted_address"],
-      types: ["establishment"], // businesses only; remove to allow any place
+      types: ["establishment"],
     });
     autoRef.current = ac;
-
     ac.addListener("place_changed", () => {
       const p = ac.getPlace();
-      if (!p || !p.geometry || !p.place_id) return;
+      if (!p || !p.place_id || !p.geometry) return;
       const lat = p.geometry.location.lat();
       const lng = p.geometry.location.lng();
-      setResolved({
-        place_id: p.place_id,
-        name: p.name,
-        address: p.formatted_address || null,
-        lat, lng,
-      });
+      setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || null, lat, lng });
       if (snapToBusiness) {
-        setCenterLat(lat);
-        setCenterLng(lng);
-        if (mapRef.current) mapRef.current.setCenter({ lat, lng });
+        setCenterLat(lat); setCenterLng(lng);
+        mapRef.current?.setCenter({ lat, lng });
       }
-      // Prefer desktop for deeper result set
+      setPreds([]); setPredOpen(false);
       setDevice("desktop");
     });
-  }, [snapToBusiness]);
+  }
+
+  // Always create fallback services too
+  if (g.places?.AutocompleteService) {
+    acServiceRef.current = new g.places.AutocompleteService();
+  }
+  if (mapRef.current && g.places?.PlacesService) {
+    placeServiceRef.current = new g.places.PlacesService(mapRef.current);
+  }
+}, [mapsReady, snapToBusiness]);
+
+  function onPlaceInput(e) {
+  const q = e.target.value || "";
+    <input
+  ref={placeInputRef}
+  onInput={onPlaceInput}               // <— add this
+  placeholder="Start typing business name…"
+  style={{ width:"100%", padding:8, border:"1px solid #d1d5db", borderRadius:8 }}
+/>
+
+  // If widget exists, let it do its thing (it shows Google’s native dropdown)
+  if (autoRef.current) return;
+
+  // Otherwise, use fallback predictions list
+  if (!acServiceRef.current) return;
+  if (q.length < 2) { setPreds([]); setPredOpen(false); return; }
+
+  // Optional: bias to current map center
+  const center = mapRef.current?.getCenter();
+  const locationBias = center ? { location: center, radius: 10000 } : undefined;
+
+  acServiceRef.current.getPlacePredictions(
+    { input: q, types: ["establishment"], ...locationBias && { locationBias } },
+    (res, status) => {
+      if (status !== window.google.maps.places.PlacesServiceStatus.OK || !res?.length) {
+        setPreds([]); setPredOpen(false); return;
+      }
+      setPreds(res.slice(0, 8)); setPredOpen(true);
+    }
+  );
+}
+function pickPrediction(pred) {
+  if (!placeServiceRef.current) return;
+  placeServiceRef.current.getDetails(
+    { placeId: pred.place_id, fields: ["place_id","name","geometry","formatted_address"] },
+    (p, status) => {
+      if (status !== window.google.maps.places.PlacesServiceStatus.OK || !p?.geometry) return;
+      const lat = p.geometry.location.lat();
+      const lng = p.geometry.location.lng();
+      setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || pred.description || null, lat, lng });
+      if (snapToBusiness) {
+        setCenterLat(lat); setCenterLng(lng);
+        mapRef.current?.setCenter({ lat, lng });
+      }
+      // set the input’s value visibly
+      if (placeInputRef.current) placeInputRef.current.value = p.name;
+      setPreds([]); setPredOpen(false);
+      setDevice("desktop");
+    }
+  );
+}
+
 
   // Helper: color by rank
   const colorFor = (rank) => {
