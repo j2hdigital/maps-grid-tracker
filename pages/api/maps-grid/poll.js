@@ -13,16 +13,18 @@ function authHeader() {
 const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
 
 function findRank(items, target) {
+  const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
   const wantPlace = (target?.place_id || "").trim();
   const wantName = norm(target?.name || "");
 
-  // Prefer exact place_id
+  // 1) Prefer exact place_id
   for (const it of (items || [])) {
     if (wantPlace && it.place_id === wantPlace) {
       return it.rank_group ?? it.rank_absolute ?? null;
     }
   }
-  // Fallback by normalized title/name
+
+  // 2) Fallback name match
   if (wantName) {
     for (const it of (items || [])) {
       const title = norm(it.title || it.name || "");
@@ -31,8 +33,15 @@ function findRank(items, target) {
       }
     }
   }
-  return null; // not found in top results
+
+  // 3) NEW: if no target provided, return the top result's rank
+  if (!wantPlace && !wantName && items?.length) {
+    return items[0].rank_group ?? items[0].rank_absolute ?? 1;
+  }
+
+  return null;
 }
+
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
