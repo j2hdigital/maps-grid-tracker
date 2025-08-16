@@ -1,16 +1,34 @@
 // pages/api/maps-grid/start.js
-import { buildGrid } from "../../../lib/geo";
+// Creates DataForSEO tasks for each grid cell.
 
-const DFS_BASE = "https://api.dataforseo.com/v3";
-
-// Basic Auth header for DataForSEO
 function authHeader() {
-  const { DFS_LOGIN, DFS_PASSWORD } = process.env;
-  if (!DFS_LOGIN || !DFS_PASSWORD) {
-    throw new Error("Missing DFS_LOGIN or DFS_PASSWORD env vars");
+  const login = process.env.DFS_LOGIN;
+  const password = process.env.DFS_PASSWORD;
+  if (!login || !password) return null;
+  const token = Buffer.from(`${login}:${password}`).toString("base64");
+  return {
+    Authorization: `Basic ${token}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+}
+
+// build symmetric grid (n x n) around center with given spacing (meters)
+function buildGrid(centerLat, centerLng, n, spacingM) {
+  const out = [];
+  const R = 6378137; // earth radius (m)
+  const dLat = spacingM / R;
+  const dLng = (spacingM / (R * Math.cos((centerLat * Math.PI) / 180)));
+
+  const half = Math.floor(n / 2);
+  for (let row = -half; row <= half; row++) {
+    for (let col = -half; col <= half; col++) {
+      const lat = centerLat + (row * dLat * 180) / Math.PI;
+      const lng = centerLng + (col * dLng * 180) / Math.PI;
+      out.push({ row: row + half, col: col + half, lat, lng });
+    }
   }
-  const token = Buffer.from(`${DFS_LOGIN}:${DFS_PASSWORD}`).toString("base64");
-  return { Authorization: `Basic ${token}` };
+  return out;
 }
 
 export default async function handler(req, res) {
@@ -19,66 +37,63 @@ export default async function handler(req, res) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const {
-      keyword,                 // required
-      centerLat, centerLng,    // required
-      gridSize = 9,            // odd numbers (5,7,9...)
-      spacingM = 500,          // meters between points
+      keyword,
+      centerLat,
+      centerLng,
+      gridSize = 5,
+      spacingM = 804.672, // ~0.5mi
       language_code = "en",
-      device = "desktop",      // desktop returns up to 100 items; mobile ~20
-      zoom = "15z",            // "14z".."17z"
-      tag = ""
+      device = "desktop",
+      zoom = "15z",
     } = body;
 
-    if (!keyword || centerLat == null || centerLng == null) {
-      return res.status(400).json({ error: "Missing keyword/centerLat/centerLng" });
+    if (!keyword || typeof centerLat !== "number" || typeof centerLng !== "number") {
+      return res.status(400).json({ error: "Missing keyword or centerLat/centerLng" });
     }
 
-    const cells = buildGrid({
-      centerLat: +centerLat,
-      centerLng: +centerLng,
-      gridSize: +gridSize,
-      spacingM: +spacingM
-    });
+    const auth = authHeader();
+    if (!auth) return res.status(500).json({ error: "Missing DFS_LOGIN/DFS_PASSWORD env vars" });
 
-    // One task per cell
-    const tasks = cells.map(cell => ({
+    const cells = buildGrid(Number(centerLat), Number(centerLng), Number(gridSize), Number(spacingM));
+
+    // Prepare DFS tasks with higher depth for stable Top 3
+    const tasks = cells.map((c) => ({
       keyword,
-      language_code,
+      location_coordinate: `${c.lat},${c.lng}`,
       device,
-      // Google Maps: lat,lng,zoom
-      location_coordinate: `${cell.lat},${cell.lng},${zoom}`,
-      tag: tag || `grid-${Date.now()}`
-      {
-  "keyword": keyword,
-  "location_coordinate": `${lat},${lng}`,
-  "device": device,                // "desktop"
-  "language_code": language_code,  // "en"
-  "loc_name_canonical": false,
-+ "depth": 50
-}
+      language_code,
+      // Important bits
+      depth: 50,
+      loc_name_canonical: false,
+      // These two can help DFS cluster properly
+      search_param: `hl=${language_code}&gl=us&num=50`,
+      tag: `grid_${gridSize}_${spacingM}`
     }));
 
-    // inside the payload you POST to DataForSEO (for each grid cell)
-
-       
-    
-    // DataForSEO expects object with numeric keys
-    const payload = tasks.reduce((acc, t, i) => (acc[i] = t, acc), {});
-    const r = await fetch(`${DFS_BASE}/serp/google/maps/task_post`, {
+    const r = await fetch("https://api.dataforseo.com/v3/serp/google/maps/task_post", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader() },
-      body: JSON.stringify(payload)
+      headers: auth,
+      body: JSON.stringify(tasks),
     });
     const j = await r.json();
 
-    if (!r.ok || j.status_code !== 20000) {
-      return res.status(r.status || 502).json({ error: "DFS task_post failed", detail: j });
+    if (!(r.ok && j.status_code === 20000)) {
+      return res.status(r.status || 502).json({
+        error: "DFS task_post failed",
+        dfs_status_code: j.status_code,
+        dfs_message: j.status_message,
+        dfs_error: j.error,
+      });
     }
 
-    const ids = (j.tasks || []).filter(t => t.status_code === 20100).map(t => t.id);
-    const n = Math.min(ids.length, cells.length);
-    return res.status(200).json({ ok: true, ids: ids.slice(0, n), cells: cells.slice(0, n) });
+    // Collect task ids in the same order as cells
+    const results = j.tasks?.[0]?.result || j.tasks?.flatMap(t => t.result || []) || [];
+    // Some responses return results array aligned with tasks; be defensive:
+    const ids = results.map(r => r.id) || [];
+
+    return res.status(200).json({ ok: true, cells, ids, zoom, device, language_code });
   } catch (e) {
+    console.error("start.js error:", e);
     return res.status(500).json({ error: "Server error", detail: String(e).slice(0, 500) });
   }
 }
