@@ -16,15 +16,17 @@ export default function Home() {
   const [resolved, setResolved] = useState(null); // { place_id, name, address, lat, lng }
   const [snapToBusiness, setSnapToBusiness] = useState(true);
 
-  // ---------- Grid params ----------
-  const [keyword, setKeyword] = useState("plumber");
+  // ---------- Map center (internal; hidden from UI) ----------
   const [centerLat, setCenterLat] = useState(41.671);
   const [centerLng, setCenterLng] = useState(-73.12);
-  const [gridSize, setGridSize] = useState(9);      // odd: 5/7/9/11...
-  const [spacingM, setSpacingM] = useState(500);    // meters between cells
-  const [zoom, setZoom] = useState("15z");
-  const [language, setLanguage] = useState("en");
-  const [device, setDevice] = useState("desktop");  // desktop returns up to 100 results
+
+  // ---------- Grid params shown in UI ----------
+  const [keyword, setKeyword] = useState("");
+  const [gridSize, setGridSize] = useState(7);     // 3,5,7
+  const [spacingM, setSpacingM] = useState(804.672); // default 0.5 miles in meters
+  const device = "desktop"; // fixed (deeper results)
+  const zoom = "15z";       // keep constant
+  const language = "en";    // keep constant
 
   // ---------- Job state ----------
   const [cells, setCells] = useState([]);
@@ -71,7 +73,6 @@ export default function Home() {
       streetViewControl: false,
       fullscreenControl: false,
     });
-    // Ensure it renders after layout
     setTimeout(() => window.google?.maps?.event?.trigger(mapRef.current, "resize"), 300);
 
     // Create fallback PlacesService bound to this map
@@ -111,7 +112,6 @@ export default function Home() {
           mapRef.current?.setCenter({ lat, lng });
         }
         setPreds([]); setPredOpen(false);
-        setDevice("desktop");
       });
     }
 
@@ -162,19 +162,19 @@ export default function Home() {
         }
         if (placeInputRef.current) placeInputRef.current.value = p.name;
         setPreds([]); setPredOpen(false);
-        setDevice("desktop");
       }
     );
   }
 
-  // ---------- Color helper ----------
+  // ---------- Color helper (new criteria) ----------
   const colorFor = (rank) => {
-    if (rank === "pending") return "#94a3b8"; // slate-400
-    if (rank == null) return "#9ca3af";       // gray-400
-    if (rank <= 3) return "#22c55e";          // green-500
-    if (rank <= 10) return "#eab308";         // yellow-500
-    if (rank <= 20) return "#f97316";         // orange-500
-    return "#ef4444";                          // red-500
+    if (rank === "pending") return "#94a3b8"; // slate
+    if (rank == null) return "#ef4444";       // red (not found)
+    if (rank === 1) return "#f59e0b";         // gold
+    if (rank <= 3) return "#22c55e";          // green
+    if (rank <= 10) return "#0ea5e9";         // blue
+    if (rank <= 20) return "#a855f7";         // purple
+    return "#ef4444";                          // red (21+)
   };
 
   // ---------- Prepare tiles ----------
@@ -199,7 +199,9 @@ export default function Home() {
     tiles.forEach((t) => {
       const rank = t.rank;
       const color = colorFor(rank);
-      const label = rank === "pending" ? "…" : (rank ?? "–").toString();
+      const label =
+        rank === "pending" ? "…" :
+        (rank == null ? "—" : String(rank));
 
       const marker = new g.Marker({
         position: { lat: t.lat, lng: t.lng },
@@ -210,11 +212,16 @@ export default function Home() {
           fillOpacity: 1,
           strokeColor: "rgba(0,0,0,0.25)",
           strokeWeight: 1.5,
-          scale: 12, // ≈ px radius
+          scale: 12,
           labelOrigin: new g.Point(0, -0.5),
         },
         label: { text: label, color: "#111", fontWeight: "700", fontSize: "12px" },
-        title: `(${t.row + 1},${t.col + 1}) ${t.lat}, ${t.lng} • rank: ${rank ?? "—"}`,
+        title:
+          rank === "pending"
+            ? `(${t.row+1},${t.col+1}) Awaiting results…`
+            : (rank == null
+                ? `(${t.row+1},${t.col+1}) Not found in top results`
+                : `(${t.row+1},${t.col+1}) Rank: ${rank}`),
       });
 
       // Hover/click → load that cell’s competitor list
@@ -331,32 +338,14 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids, resolved?.place_id]);
 
-  // ---------- Use my location ----------
-  async function useMyLocation() {
-    if (!navigator.geolocation) {
-      alert("Geolocation not supported");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const lat = pos.coords.latitude;
-        const lng = pos.coords.longitude;
-        setCenterLat(lat);
-        setCenterLng(lng);
-        if (mapRef.current) {
-          const g = window.google.maps;
-          mapRef.current.setCenter({ lat, lng });
-          // Bias fallback predictions to ~10km radius around user
-          if (acServiceRef.current && g.Circle && placeInputRef.current && !autoRef.current) {
-            // We already use locationBias when querying predictions; this just ensures center is up-to-date
-          }
-        }
-      },
-      () => alert("Couldn’t get your location")
-    );
-  }
-
+  // ---------- UI helpers ----------
   const field = { width: "100%", padding: 8, border: "1px solid #d1d5db", borderRadius: 8 };
+
+  // Distance dropdown (miles -> meters)
+  const mileOptions = [
+    0.1, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+  ];
+  const milesToMeters = (mi) => mi * 1609.344;
 
   return (
     <>
@@ -369,17 +358,14 @@ export default function Home() {
         {/* Sidebar */}
         <aside style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Maps Grid Rank Tracker</h2>
-          <p style={{ color: "#475569", marginTop: 6 }}>
-            Find your business via <b>Google Places</b>, then run the grid.
-          </p>
 
-          {/* Find Business */}
+          {/* Find listing */}
           <div style={{ gridColumn: "1 / -1", borderTop: "1px solid #e5e7eb", paddingTop: 10, marginTop: 8 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>Find Business</div>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Find your listing using Google:</div>
             <input
               ref={placeInputRef}
               onInput={onPlaceInput} // fallback predictions if widget blocked
-              placeholder="Start typing business name…"
+              placeholder="Start typing your business name…"
               style={field}
             />
             {/* Fallback predictions dropdown (only shows if widget didn't attach) */}
@@ -393,7 +379,7 @@ export default function Home() {
                   <div
                     key={p.place_id}
                     onMouseDown={(e) => { e.preventDefault(); pickPrediction(p); }}
-                    style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14, borderTop: "1px solid #f1f5f9" }}
+                    style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14, borderTop: "1px solid #eef2f7" }}
                   >
                     {p.structured_formatting?.main_text || p.description}
                     <div style={{ fontSize: 12, color: "#64748b" }}>
@@ -414,62 +400,48 @@ export default function Home() {
                 Pick from Google suggestions to lock exact place_id + coordinates.
               </div>
             )}
+          </div>
 
-            <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={useMyLocation}
-                style={{ background: "#111", color: "#fff", border: 0, borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontWeight: 700 }}
-              >
-                Use my location
-              </button>
+          {/* Map Criteria */}
+          <div style={{ marginTop: 14 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Map Criteria</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label>Distance between Grid Points:</label>
+                <select
+                  value={(spacingM / 1609.344).toString()}
+                  onChange={(e) => setSpacingM(milesToMeters(parseFloat(e.target.value)))}
+                  style={field}
+                >
+                  {mileOptions.map(mi => (
+                    <option key={mi} value={mi}>{mi} miles</option>
+                  ))}
+                </select>
+              </div>
 
-              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: "#334155" }}>
-                <input type="checkbox" checked={snapToBusiness} onChange={e => setSnapToBusiness(e.target.checked)} />
-                Snap center to selected business
-              </label>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label>Grid size template:</label>
+                <select
+                  value={gridSize}
+                  onChange={(e) => setGridSize(parseInt(e.target.value, 10))}
+                  style={field}
+                >
+                  <option value={3}>3x3</option>
+                  <option value={5}>5x5</option>
+                  <option value={7}>7x7</option>
+                </select>
+              </div>
             </div>
           </div>
 
-          {/* Grid params */}
-          <form onSubmit={startGrid} style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
-            <div style={{ gridColumn: "1 / -1" }}>
-              <label>Keyword</label>
-              <input value={keyword} onChange={e => setKeyword(e.target.value)} style={field} />
-            </div>
+          {/* Add Keyword */}
+          <form onSubmit={startGrid} style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 14 }}>
             <div>
-              <label>Center Lat</label>
-              <input value={centerLat} onChange={e => setCenterLat(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Center Lng</label>
-              <input value={centerLng} onChange={e => setCenterLng(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Grid Size</label>
-              <input type="number" min="3" step="2" value={gridSize} onChange={e => setGridSize(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Spacing (m)</label>
-              <input type="number" min="100" step="50" value={spacingM} onChange={e => setSpacingM(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Zoom</label>
-              <input value={zoom} onChange={e => setZoom(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Language</label>
-              <input value={language} onChange={e => setLanguage(e.target.value)} style={field} />
-            </div>
-            <div>
-              <label>Device</label>
-              <select value={device} onChange={e => setDevice(e.target.value)} style={field}>
-                <option value="desktop">desktop</option>
-                <option value="mobile">mobile</option>
-              </select>
+              <label>Add Keyword</label>
+              <input value={keyword} onChange={e => setKeyword(e.target.value)} style={field} placeholder="e.g., plumber" />
             </div>
 
-            <div style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
                 type="submit"
                 disabled={loading}
@@ -487,11 +459,11 @@ export default function Home() {
           <div style={{ marginTop: 16, fontSize: 13, color: "#334155" }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Legend</div>
             <div style={{ display: "grid", gridTemplateColumns: "18px 1fr", gap: 8, alignItems: "center" }}>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#22c55e", display: "inline-block" }}></span><span>#1–3</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#eab308", display: "inline-block" }}></span><span>#4–10</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#f97316", display: "inline-block" }}></span><span>#11–20</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#ef4444", display: "inline-block" }}></span><span>#21+</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#9ca3af", display: "inline-block" }}></span><span>Not found</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#f59e0b", display: "inline-block" }}></span><span>#1</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#22c55e", display: "inline-block" }}></span><span>#2–3</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#0ea5e9", display: "inline-block" }}></span><span>#4–10</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#a855f7", display: "inline-block" }}></span><span>#11–20</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#ef4444", display: "inline-block" }}></span><span>#21+ / Not found</span>
               <span style={{ width: 14, height: 14, borderRadius: 8, background: "#94a3b8", display: "inline-block" }}></span><span>Pending</span>
             </div>
           </div>
@@ -524,7 +496,7 @@ export default function Home() {
                 <div key={i} style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 10, padding: "10px 12px", borderTop: i ? "1px solid #eef2f7" : "none", alignItems: "center" }}>
                   <div style={{
                     width: 28, height: 28, borderRadius: 16, display: "flex", alignItems: "center", justifyContent: "center",
-                    background: (() => { const r = it.rank; if (r == null) return "#9ca3af"; if (r <= 3) return "#22c55e"; if (r <= 10) return "#eab308"; if (r <= 20) return "#f97316"; return "#ef4444"; })(),
+                    background: (() => { const r = it.rank; if (r == null) return "#ef4444"; if (r === 1) return "#f59e0b"; if (r <= 3) return "#22c55e"; if (r <= 10) return "#0ea5e9"; if (r <= 20) return "#a855f7"; return "#ef4444"; })(),
                     color: "#111", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,0,0,0.15)"
                   }}>
                     {it.rank ?? "–"}
@@ -534,7 +506,7 @@ export default function Home() {
                     <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{it.address || ""}</div>
                     <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
                       {it.rating ? `★ ${it.rating} ` : ""}{it.rating_count ? `(${it.rating_count})` : ""}
-                      {it.website ? <> • <span style={{ color: "#0ea5e9" }}>{String(it.website).replace(/^https?:\/\//, "").replace(/\/$/, "")}</span></> : null}
+                      {it.website ? <> • <span style={{ color: "#0ea5e9" }}>{String(it.website)}</span></> : null}
                     </div>
                   </div>
                 </div>
