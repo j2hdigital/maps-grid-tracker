@@ -48,8 +48,20 @@ export default async function handler(req, res) {
       // Google Maps: lat,lng,zoom
       location_coordinate: `${cell.lat},${cell.lng},${zoom}`,
       tag: tag || `grid-${Date.now()}`
+      {
+  "keyword": keyword,
+  "location_coordinate": `${lat},${lng}`,
+  "device": device,                // "desktop"
+  "language_code": language_code,  // "en"
+  "loc_name_canonical": false,
++ "depth": 50
+}
     }));
 
+    // inside the payload you POST to DataForSEO (for each grid cell)
+
+       
+    
     // DataForSEO expects object with numeric keys
     const payload = tasks.reduce((acc, t, i) => (acc[i] = t, acc), {});
     const r = await fetch(`${DFS_BASE}/serp/google/maps/task_post`, {
