@@ -1,4 +1,6 @@
 // pages/api/maps-grid/top.js
+// GET /api/maps-grid/top?id=TASK_ID
+
 function authHeader() {
   const login = process.env.DFS_LOGIN;
   const password = process.env.DFS_PASSWORD;
@@ -10,13 +12,11 @@ function authHeader() {
     Accept: "application/json",
   };
 }
-
 function asString(v) {
   if (v == null) return null;
   if (typeof v === "string") return v;
   try { return JSON.stringify(v); } catch { return String(v); }
 }
-
 function formatAddress(it) {
   if (typeof it.address === "string" && it.address.trim()) return it.address.trim();
   const ai = it.address_info;
@@ -27,7 +27,6 @@ function formatAddress(it) {
   if (typeof it.snippet === "string" && it.snippet.trim()) return it.snippet.trim();
   return null;
 }
-
 function formatWebsite(it) {
   const w = it.domain || it.website || it.url;
   if (!w) return null;
@@ -65,11 +64,14 @@ export default async function handler(req, res) {
 
     const items = j?.tasks?.[0]?.result?.[0]?.items || [];
     const sorted = items
-      .filter(x => x && (x.rank_group != null || x.rank_absolute != null))
-      .sort((a, b) => (a.rank_group ?? a.rank_absolute ?? 9999) - (b.rank_group ?? b.rank_absolute ?? 9999));
+      .filter((x) => x && (x.rank_group != null || x.rank_absolute != null))
+      .sort(
+        (a, b) =>
+          (a.rank_group ?? a.rank_absolute ?? 9999) -
+          (b.rank_group ?? b.rank_absolute ?? 9999)
+      );
 
-    // Build exactly Top 3
-    const top3 = sorted.slice(0, 3).map(it => ({
+    const top3 = sorted.slice(0, 3).map((it) => ({
       rank: it.rank_group ?? it.rank_absolute ?? null,
       name: (asString(it.title || it.name || "") || "").trim() || "—",
       address: (asString(formatAddress(it) || "") || "").trim() || null,
@@ -82,7 +84,17 @@ export default async function handler(req, res) {
     }));
 
     while (top3.length < 3) {
-      top3.push({ rank: null, name: "—", address: "", rating: null, rating_count: null, website: null, phone: null, place_id: null, cid: null });
+      top3.push({
+        rank: null,
+        name: "—",
+        address: "",
+        rating: null,
+        rating_count: null,
+        website: null,
+        phone: null,
+        place_id: null,
+        cid: null,
+      });
     }
 
     return res.status(200).json({ ok: true, total: items.length, items: top3 });
