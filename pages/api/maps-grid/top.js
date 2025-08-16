@@ -1,5 +1,4 @@
 // pages/api/maps-grid/top.js
-// GET /api/maps-grid/top?id=TASK_ID&limit=20
 function authHeader() {
   const login = process.env.DFS_LOGIN;
   const password = process.env.DFS_PASSWORD;
@@ -42,14 +41,13 @@ function formatWebsite(it) {
 }
 
 export default async function handler(req, res) {
-  if (req.method !== "GET") {
-    return res.status(405).json({ error: "Method not allowed. Use GET ?id=" });
-  }
+  if (req.method !== "GET") return res.status(405).json({ error: "Use GET ?id=" });
+
   try {
     const auth = authHeader();
-    if (!auth) return res.status(500).json({ error: "Missing DFS_LOGIN/DFS_PASSWORD env vars" });
+    if (!auth) return res.status(500).json({ error: "Missing DFS_LOGIN/DFS_PASSWORD" });
 
-    const { id, limit = "20" } = req.query;
+    const { id } = req.query;
     if (!id) return res.status(400).json({ error: "Missing ?id=" });
 
     const url = `https://api.dataforseo.com/v3/serp/google/maps/task_get/advanced/${encodeURIComponent(id)}`;
@@ -66,26 +64,28 @@ export default async function handler(req, res) {
     }
 
     const items = j?.tasks?.[0]?.result?.[0]?.items || [];
-
-    // Sort by rank_group then take up to "limit"
     const sorted = items
-      .filter((x) => x && (x.rank_group != null || x.rank_absolute != null))
-      .sort((a, b) => (a.rank_group ?? a.rank_absolute ?? 9999) - (b.rank_group ?? b.rank_absolute ?? 9999))
-      .slice(0, Number(limit));
+      .filter(x => x && (x.rank_group != null || x.rank_absolute != null))
+      .sort((a, b) => (a.rank_group ?? a.rank_absolute ?? 9999) - (b.rank_group ?? b.rank_absolute ?? 9999));
 
-    const compact = sorted.map((it) => ({
+    // Build exactly Top 3
+    const top3 = sorted.slice(0, 3).map(it => ({
       rank: it.rank_group ?? it.rank_absolute ?? null,
-      name: asString(it.title || it.name || "").trim(),
-      address: asString(formatAddress(it) || "").trim() || null,
+      name: (asString(it.title || it.name || "") || "").trim() || "—",
+      address: (asString(formatAddress(it) || "") || "").trim() || null,
       rating: it.rating ?? null,
       rating_count: it.user_ratings_total ?? it.rating_count ?? null,
-      website: asString(formatWebsite(it) || "").trim() || null,
-      phone: asString(it.phone || it.phone_number || "").trim() || null,
-      place_id: asString(it.place_id || "").trim() || null,
-      cid: asString(it.cid || "").trim() || null,
+      website: (asString(formatWebsite(it) || "") || "").trim() || null,
+      phone: (asString(it.phone || it.phone_number || "") || "").trim() || null,
+      place_id: (asString(it.place_id || "") || "").trim() || null,
+      cid: (asString(it.cid || "") || "").trim() || null,
     }));
 
-    return res.status(200).json({ ok: true, total: items.length, items: compact });
+    while (top3.length < 3) {
+      top3.push({ rank: null, name: "—", address: "", rating: null, rating_count: null, website: null, phone: null, place_id: null, cid: null });
+    }
+
+    return res.status(200).json({ ok: true, total: items.length, items: top3 });
   } catch (e) {
     console.error("top.js error:", e);
     return res.status(500).json({ error: "Server error", detail: String(e).slice(0, 500) });
