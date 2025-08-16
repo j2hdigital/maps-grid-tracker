@@ -225,26 +225,61 @@ export default function Home() {
       });
 
       // Hover/click → load that cell’s competitor list
-      const loadTopFor = async (taskId) => {
-        if (!taskId) return;
-        setSelectedTaskId(taskId);
-        try {
-          const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(taskId)}&limit=20`);
-          const jj = await rr.json();
-          if (rr.ok && jj.ok) setTopItems(jj.items || []);
-        } catch { /* ignore */ }
-      };
-      marker.addListener("mouseover", () => loadTopFor(t.id));
-      marker.addListener("click", () => loadTopFor(t.id));
+     const loadTopFor = async (taskId) => {
+  if (!taskId) return;
+  setSelectedTaskId(taskId);
+  try {
+    // ask for more, we’ll slice to top 3 on the client
+    const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(taskId)}&limit=20`);
+    const jj = await rr.json();
+    if (rr.ok && jj.ok) {
+      const items = Array.isArray(jj.items) ? jj.items : [];
 
-      markersRef.current.push(marker);
-      bounds.extend(marker.getPosition());
-    });
+      // Build Top 3 list (pad with placeholders if fewer than 3)
+      const top3 = items.slice(0, 3);
+      while (top3.length < 3) {
+        top3.push({
+          rank: null,
+          name: "—",
+          address: "",
+          rating: null,
+          rating_count: null,
+          website: null,
+          phone: null,
+          place_id: null,
+          cid: null,
+        });
+      }
+      setTopItems(top3);
 
-    if (!bounds.isEmpty()) {
-      mapRef.current.fitBounds(bounds, 60);
+      // Client-side rank correction for the marker:
+      if (resolved?.name || resolved?.place_id) {
+        const hit = items.find((it) => matchesTarget(it, {
+          place_id: resolved.place_id,
+          name: resolved.name,
+          website: resolved.website,
+          phone: resolved.phone
+        }));
+        if (hit && hit.rank != null) {
+          setRanks((prev) => (prev[taskId] === hit.rank ? prev : { ...prev, [taskId]: hit.rank }));
+        }
+      }
+    } else {
+      setTopItems([
+        { rank: null, name: "—", address: "" },
+        { rank: null, name: "—", address: "" },
+        { rank: null, name: "—", address: "" },
+      ]);
     }
-  }, [tiles, mapsReady]);
+  } catch {
+    setTopItems([
+      { rank: null, name: "—", address: "" },
+      { rank: null, name: "—", address: "" },
+      { rank: null, name: "—", address: "" },
+    ]);
+  }
+};
+
 
   // ---------- Start grid ----------
   async function startGrid(e) {
@@ -292,7 +327,44 @@ export default function Home() {
       setLoading(false);
     }
   }
+{topItems.length === 0 ? (
+  <div style={{ padding: 10, color: "#64748b", fontSize: 13 }}>Hover or click a dot to see that cell’s results.</div>
+) : topItems.map((it, i) => {
+  const safeName = typeof it.name === "string" ? it.name : "";
+  const safeAddr = typeof it.address === "string" ? it.address : "";
+  const safeWeb  = typeof it.website === "string" ? it.website : "";
 
+  const isYou = matchesTarget(it, {
+    place_id: resolved?.place_id,
+    name: resolved?.name,
+    website: resolved?.website,
+    phone: resolved?.phone
+  });
+
+  return (
+    <div key={i} style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 10, padding: "10px 12px", borderTop: i ? "1px solid #eef2f7" : "none", alignItems: "center" }}>
+      <div style={{
+        width: 28, height: 28, borderRadius: 16, display: "flex", alignItems: "center", justifyContent: "center",
+        background: (() => { const r = it.rank; if (r == null) return "#ef4444"; if (r === 1) return "#f59e0b"; if (r <= 3) return "#22c55e"; if (r <= 10) return "#0ea5e9"; if (r <= 20) return "#a855f7"; return "#ef4444"; })(),
+        color: "#111", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,0,0,0.15)"
+      }}>
+        {it.rank ?? "–"}
+      </div>
+      <div>
+        <div style={{ fontWeight: 700, fontSize: 14, lineHeight: "18px" }}>
+          {safeName || "—"} {isYou ? <span style={{ marginLeft: 6, fontSize: 11, padding: "2px 6px", border: "1px solid #16a34a", color: "#16a34a", borderRadius: 999 }}>You</span> : null}
+        </div>
+        {safeAddr ? <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{safeAddr}</div> : null}
+        {(it.rating || it.rating_count || safeWeb) ? (
+          <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+            {it.rating ? `★ ${it.rating} ` : ""}{it.rating_count ? `(${it.rating_count})` : ""}
+            {safeWeb ? <> • <span style={{ color: "#0ea5e9" }}>{safeWeb}</span></> : null}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+})}
   // ---------- Poll ranks ----------
   useEffect(() => {
     if (!ids.length) return;
