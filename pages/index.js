@@ -2,70 +2,113 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import Head from "next/head";
 
+function normName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{Letter}\p{Number}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function hostOf(u) {
+  if (!u) return null;
+  try {
+    const x = new URL(u.startsWith("http") ? u : `https://${u}`);
+    return x.hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return String(u)
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .split("/")[0]
+      .toLowerCase();
+  }
+}
+function matchesTarget(item, target) {
+  if (!item || !target) return false;
+  if (target.place_id && item.place_id && target.place_id === item.place_id) return true;
+  const tHost = hostOf(target.website);
+  const iHost = hostOf(item.website);
+  if (tHost && iHost && tHost === iHost) return true;
+  const tPhone = String(target.phone || "").replace(/[^\d]/g, "");
+  const iPhone = String(item.phone || "").replace(/[^\d]/g, "");
+  if (tPhone && iPhone && tPhone === iPhone) return true;
+  const strip = (x) =>
+    x
+      .replace(/\b(llc|inc|co|company|corp|corporation|pllc|plc|ltd)\b/g, "")
+      .replace(/\b&\b/g, " and ")
+      .trim();
+  const a = strip(normName(target.name));
+  const b = strip(normName(item.name));
+  if (a && b && (a === b || a.includes(b) || b.includes(a))) return true;
+  return false;
+}
+
 export default function Home() {
-  // ---------- Google Maps / Places readiness ----------
+  // Google readiness
   const [mapsReady, setMapsReady] = useState(false);
 
-  // ---------- Business selection ----------
-  const placeInputRef = useRef(null);     // <input> element
-  const autoRef = useRef(null);           // Autocomplete widget (if available)
-  const acServiceRef = useRef(null);      // Fallback AutocompleteService
-  const placeServiceRef = useRef(null);   // Fallback PlacesService
-  const [preds, setPreds] = useState([]); // Fallback predictions list
+  // Business selection
+  const placeInputRef = useRef(null);
+  const autoRef = useRef(null);
+  const acServiceRef = useRef(null);
+  const placeServiceRef = useRef(null);
+  const [preds, setPreds] = useState([]);
   const [predOpen, setPredOpen] = useState(false);
-  const [resolved, setResolved] = useState(null); // { place_id, name, address, lat, lng }
-  const [snapToBusiness, setSnapToBusiness] = useState(true);
+  const [resolved, setResolved] = useState(null); // {place_id,name,address,phone,website,lat,lng}
+  const [snapToBusiness] = useState(true);
 
-  // ---------- Map center (internal; hidden from UI) ----------
+  // Hidden center (we auto-snap to selected business)
   const [centerLat, setCenterLat] = useState(41.671);
   const [centerLng, setCenterLng] = useState(-73.12);
 
-  // ---------- Grid params shown in UI ----------
+  // UI params
   const [keyword, setKeyword] = useState("");
-  const [gridSize, setGridSize] = useState(7);     // 3,5,7
-  const [spacingM, setSpacingM] = useState(804.672); // default 0.5 miles in meters
-  const device = "desktop"; // fixed (deeper results)
-  const zoom = "15z";       // keep constant
-  const language = "en";    // keep constant
+  const [gridSize, setGridSize] = useState(7); // 3,5,7
+  const [spacingM, setSpacingM] = useState(804.672); // 0.5 mi default
+  const device = "desktop";
+  const zoom = "15z";
+  const language = "en";
 
-  // ---------- Job state ----------
+  // Job state
   const [cells, setCells] = useState([]);
   const [ids, setIds] = useState([]);
   const [ranks, setRanks] = useState({});
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
 
-  // ---------- Competitor list panel ----------
+  // Competitor panel
   const [topItems, setTopItems] = useState([]);
   const [selectedTaskId, setSelectedTaskId] = useState(null);
 
-  // ---------- Map ----------
+  // Map
   const mapDiv = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
 
-  // ---------- Load Google Maps JS (with Places library) ----------
+  // Load Google Maps
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (window.google?.maps) { setMapsReady(true); return; }
+    if (window.google?.maps) {
+      setMapsReady(true);
+      return;
+    }
     const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
-    if (!key) { console.warn("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY"); return; }
+    if (!key) {
+      console.warn("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY");
+      return;
+    }
     const s = document.createElement("script");
     s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places`;
     s.async = true;
+    s.onload = () => setMapsReady(!!window.google?.maps);
     s.onerror = () => console.error("Failed to load Google Maps script");
-    s.onload = () => {
-      if (window.google?.maps) setMapsReady(true);
-      else console.error("Google Maps loaded but window.google.maps is missing");
-    };
     document.head.appendChild(s);
   }, []);
 
-  // ---------- Init map once Google is ready ----------
+  // Init map
   useEffect(() => {
     if (!mapsReady) return;
     if (!mapDiv.current || mapRef.current) return;
-
     mapRef.current = new window.google.maps.Map(mapDiv.current, {
       center: { lat: Number(centerLat), lng: Number(centerLng) },
       zoom: 12,
@@ -74,48 +117,61 @@ export default function Home() {
       fullscreenControl: false,
     });
     setTimeout(() => window.google?.maps?.event?.trigger(mapRef.current, "resize"), 300);
-
-    // Create fallback PlacesService bound to this map
     if (window.google.maps.places?.PlacesService) {
       placeServiceRef.current = new window.google.maps.places.PlacesService(mapRef.current);
     }
-  }, [mapsReady]);
+  }, [mapsReady, centerLat, centerLng]);
 
-  // ---------- Re-center map if center changes ----------
+  // Recenter on center changes
   useEffect(() => {
     if (mapRef.current) {
       mapRef.current.setCenter({ lat: Number(centerLat), lng: Number(centerLng) });
     }
   }, [centerLat, centerLng]);
 
-  // ---------- Autocomplete widget + fallback services ----------
+  // Autocomplete + fallback services
   useEffect(() => {
     if (!mapsReady) return;
     const g = window.google.maps;
 
-    // Standard widget (shows Google's dropdown)
     if (placeInputRef.current && g.places?.Autocomplete) {
       const ac = new g.places.Autocomplete(placeInputRef.current, {
-        fields: ["place_id", "name", "geometry", "formatted_address"],
-        types: ["establishment"], // businesses
+        fields: [
+          "place_id",
+          "name",
+          "geometry",
+          "formatted_address",
+          "formatted_phone_number",
+          "international_phone_number",
+          "website",
+        ],
+        types: ["establishment"],
       });
       autoRef.current = ac;
-
       ac.addListener("place_changed", () => {
         const p = ac.getPlace();
         if (!p || !p.place_id || !p.geometry) return;
         const lat = p.geometry.location.lat();
         const lng = p.geometry.location.lng();
-        setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || null, lat, lng });
+        setResolved({
+          place_id: p.place_id,
+          name: p.name,
+          address: p.formatted_address || null,
+          phone: p.formatted_phone_number || p.international_phone_number || null,
+          website: p.website || null,
+          lat,
+          lng,
+        });
         if (snapToBusiness) {
-          setCenterLat(lat); setCenterLng(lng);
+          setCenterLat(lat);
+          setCenterLng(lng);
           mapRef.current?.setCenter({ lat, lng });
         }
-        setPreds([]); setPredOpen(false);
+        setPreds([]);
+        setPredOpen(false);
       });
     }
 
-    // Fallback services (used if widget is unavailable or blocked)
     if (g.places?.AutocompleteService) {
       acServiceRef.current = new g.places.AutocompleteService();
     }
@@ -124,85 +180,158 @@ export default function Home() {
     }
   }, [mapsReady, snapToBusiness]);
 
-  // ---------- Fallback: fetch predictions when typing (if widget didn't attach) ----------
+  // Fallback predictions
   function onPlaceInput(e) {
     const q = e.target.value || "";
-    if (autoRef.current) return; // widget will handle its own dropdown
-
+    if (autoRef.current) return; // widget will handle its dropdown
     if (!acServiceRef.current) return;
-    if (q.length < 2) { setPreds([]); setPredOpen(false); return; }
-
+    if (q.length < 2) {
+      setPreds([]);
+      setPredOpen(false);
+      return;
+    }
     const center = mapRef.current?.getCenter();
     const locationBias = center ? { location: center, radius: 10000 } : undefined;
-
     acServiceRef.current.getPlacePredictions(
       { input: q, types: ["establishment"], ...(locationBias ? { locationBias } : {}) },
       (res, status) => {
         if (status !== window.google.maps.places.PlacesServiceStatus.OK || !res?.length) {
-          setPreds([]); setPredOpen(false); return;
+          setPreds([]);
+          setPredOpen(false);
+          return;
         }
-        setPreds(res.slice(0, 8)); setPredOpen(true);
+        setPreds(res.slice(0, 8));
+        setPredOpen(true);
       }
     );
   }
 
-  // ---------- Fallback: pick a prediction and resolve details ----------
+  // Fallback pick
   function pickPrediction(pred) {
     if (!placeServiceRef.current) return;
     placeServiceRef.current.getDetails(
-      { placeId: pred.place_id, fields: ["place_id","name","geometry","formatted_address"] },
+      {
+        placeId: pred.place_id,
+        fields: [
+          "place_id",
+          "name",
+          "geometry",
+          "formatted_address",
+          "formatted_phone_number",
+          "international_phone_number",
+          "website",
+        ],
+      },
       (p, status) => {
         if (status !== window.google.maps.places.PlacesServiceStatus.OK || !p?.geometry) return;
         const lat = p.geometry.location.lat();
         const lng = p.geometry.location.lng();
-        setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || pred.description || null, lat, lng });
+        setResolved({
+          place_id: p.place_id,
+          name: p.name,
+          address: p.formatted_address || pred.description || null,
+          phone: p.formatted_phone_number || p.international_phone_number || null,
+          website: p.website || null,
+          lat,
+          lng,
+        });
         if (snapToBusiness) {
-          setCenterLat(lat); setCenterLng(lng);
+          setCenterLat(lat);
+          setCenterLng(lng);
           mapRef.current?.setCenter({ lat, lng });
         }
         if (placeInputRef.current) placeInputRef.current.value = p.name;
-        setPreds([]); setPredOpen(false);
+        setPreds([]);
+        setPredOpen(false);
       }
     );
   }
 
-  // ---------- Color helper (new criteria) ----------
+  // Color rules
   const colorFor = (rank) => {
-    if (rank === "pending") return "#94a3b8"; // slate
-    if (rank == null) return "#ef4444";       // red (not found)
-    if (rank === 1) return "#f59e0b";         // gold
-    if (rank <= 3) return "#22c55e";          // green
-    if (rank <= 10) return "#0ea5e9";         // blue
-    if (rank <= 20) return "#a855f7";         // purple
-    return "#ef4444";                          // red (21+)
+    if (rank === "pending") return "#94a3b8";
+    if (rank == null) return "#ef4444";
+    if (rank === 1) return "#f59e0b";
+    if (rank <= 3) return "#22c55e";
+    if (rank <= 10) return "#0ea5e9";
+    if (rank <= 20) return "#a855f7";
+    return "#ef4444";
   };
 
-  // ---------- Prepare tiles ----------
+  // Tiles
   const tiles = useMemo(() => {
     if (!cells.length || !ids.length) return [];
     return cells.map((cell, idx) => ({ ...cell, id: ids[idx], rank: ranks[ids[idx]] }));
   }, [cells, ids, ranks]);
 
-  // ---------- Draw markers ----------
+  // Draw markers
   useEffect(() => {
     if (!mapsReady || !mapRef.current || !window.google?.maps) return;
     const g = window.google.maps;
-
-    // Clear old markers
-    markersRef.current.forEach(m => m.setMap(null));
+    markersRef.current.forEach((m) => m.setMap(null));
     markersRef.current = [];
-
     if (!tiles.length) return;
-
     const bounds = new g.LatLngBounds();
+
+    const loadTopFor = async (taskId) => {
+      if (!taskId) return;
+      setSelectedTaskId(taskId);
+      try {
+        const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(taskId)}&limit=20`);
+        const jj = await rr.json();
+        if (rr.ok && jj.ok) {
+          const items = Array.isArray(jj.items) ? jj.items : [];
+          // Always render Top 3 (pad)
+          const top3 = items.slice(0, 3);
+          while (top3.length < 3) {
+            top3.push({
+              rank: null,
+              name: "—",
+              address: "",
+              rating: null,
+              rating_count: null,
+              website: null,
+              phone: null,
+              place_id: null,
+              cid: null,
+            });
+          }
+          setTopItems(top3);
+
+          // Client-side correction to rank map
+          if (resolved?.name || resolved?.place_id) {
+            const hit = items.find((it) =>
+              matchesTarget(it, {
+                place_id: resolved.place_id,
+                name: resolved.name,
+                website: resolved.website,
+                phone: resolved.phone,
+              })
+            );
+            if (hit && hit.rank != null) {
+              setRanks((prev) => (prev[taskId] === hit.rank ? prev : { ...prev, [taskId]: hit.rank }));
+            }
+          }
+        } else {
+          setTopItems([
+            { rank: null, name: "—", address: "" },
+            { rank: null, name: "—", address: "" },
+            { rank: null, name: "—", address: "" },
+          ]);
+        }
+      } catch {
+        setTopItems([
+          { rank: null, name: "—", address: "" },
+          { rank: null, name: "—", address: "" },
+          { rank: null, name: "—", address: "" },
+        ]);
+      }
+    };
 
     tiles.forEach((t) => {
       const rank = t.rank;
       const color = colorFor(rank);
-      const label =
-        rank === "pending" ? "…" :
-        (rank == null ? "—" : String(rank));
-
+      const label = rank === "pending" ? "…" : rank == null ? "—" : String(rank);
       const marker = new g.Marker({
         position: { lat: t.lat, lng: t.lng },
         map: mapRef.current,
@@ -218,75 +347,36 @@ export default function Home() {
         label: { text: label, color: "#111", fontWeight: "700", fontSize: "12px" },
         title:
           rank === "pending"
-            ? `(${t.row+1},${t.col+1}) Awaiting results…`
-            : (rank == null
-                ? `(${t.row+1},${t.col+1}) Not found in top results`
-                : `(${t.row+1},${t.col+1}) Rank: ${rank}`),
+            ? `(${t.row + 1},${t.col + 1}) Awaiting results…`
+            : rank == null
+            ? `(${t.row + 1},${t.col + 1}) Not found in top results`
+            : `(${t.row + 1},${t.col + 1}) Rank: ${rank}`,
       });
+      marker.addListener("mouseover", () => loadTopFor(t.id));
+      marker.addListener("click", () => loadTopFor(t.id));
+      markersRef.current.push(marker);
+      bounds.extend(marker.getPosition());
+    });
 
-      // Hover/click → load that cell’s competitor list
-     const loadTopFor = async (taskId) => {
-  if (!taskId) return;
-  setSelectedTaskId(taskId);
-  try {
-    // ask for more, we’ll slice to top 3 on the client
-    const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(taskId)}&limit=20`);
-    const jj = await rr.json();
-    if (rr.ok && jj.ok) {
-      const items = Array.isArray(jj.items) ? jj.items : [];
-
-      // Build Top 3 list (pad with placeholders if fewer than 3)
-      const top3 = items.slice(0, 3);
-      while (top3.length < 3) {
-        top3.push({
-          rank: null,
-          name: "—",
-          address: "",
-          rating: null,
-          rating_count: null,
-          website: null,
-          phone: null,
-          place_id: null,
-          cid: null,
-        });
-      }
-      setTopItems(top3);
-
-      // Client-side rank correction for the marker:
-      if (resolved?.name || resolved?.place_id) {
-        const hit = items.find((it) => matchesTarget(it, {
-          place_id: resolved.place_id,
-          name: resolved.name,
-          website: resolved.website,
-          phone: resolved.phone
-        }));
-        if (hit && hit.rank != null) {
-          setRanks((prev) => (prev[taskId] === hit.rank ? prev : { ...prev, [taskId]: hit.rank }));
-        }
-      }
-    } else {
-      setTopItems([
-        { rank: null, name: "—", address: "" },
-        { rank: null, name: "—", address: "" },
-        { rank: null, name: "—", address: "" },
-      ]);
+    if (!bounds.isEmpty()) {
+      mapRef.current.fitBounds(bounds, 60);
     }
-  } catch {
-    setTopItems([
-      { rank: null, name: "—", address: "" },
-      { rank: null, name: "—", address: "" },
-      { rank: null, name: "—", address: "" },
-    ]);
-  }
-};
+  }, [tiles, mapsReady, resolved?.name, resolved?.place_id, resolved?.website, resolved?.phone]);
 
-
-  // ---------- Start grid ----------
+  // Start grid
   async function startGrid(e) {
     e?.preventDefault?.();
+    if (!resolved?.place_id) {
+      alert("Pick your business from Google first.");
+      return;
+    }
     setLoading(true);
-    setCells([]); setIds([]); setRanks({}); setProgress({ done: 0, total: 0 });
-    setTopItems([]); setSelectedTaskId(null);
+    setCells([]);
+    setIds([]);
+    setRanks({});
+    setProgress({ done: 0, total: 0 });
+    setTopItems([]);
+    setSelectedTaskId(null);
 
     try {
       const r = await fetch("/api/maps-grid/start", {
@@ -305,7 +395,6 @@ export default function Home() {
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || "Start failed");
-
       setCells(j.cells || []);
       setIds(j.ids || []);
       setRanks(Object.fromEntries((j.ids || []).map((id) => [id, "pending"])));
@@ -319,55 +408,39 @@ export default function Home() {
         try {
           const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(centerId)}&limit=20`);
           const jj = await rr.json();
-          if (rr.ok && jj.ok) setTopItems(jj.items || []);
-        } catch { /* ignore */ }
+          if (rr.ok && jj.ok) {
+            const items = jj.items || [];
+            const top3 = items.slice(0, 3);
+            while (top3.length < 3) {
+              top3.push({ rank: null, name: "—", address: "" });
+            }
+            setTopItems(top3);
+            // Self-correct center cell rank if needed
+            const hit = items.find((it) =>
+              matchesTarget(it, {
+                place_id: resolved.place_id,
+                name: resolved.name,
+                website: resolved.website,
+                phone: resolved.phone,
+              })
+            );
+            if (hit && hit.rank != null) {
+              setRanks((prev) => (prev[centerId] === hit.rank ? prev : { ...prev, [centerId]: hit.rank }));
+            }
+          }
+        } catch {
+          /* ignore */
+        }
       }
     } catch (err) {
       alert(err.message);
       setLoading(false);
     }
   }
-{topItems.length === 0 ? (
-  <div style={{ padding: 10, color: "#64748b", fontSize: 13 }}>Hover or click a dot to see that cell’s results.</div>
-) : topItems.map((it, i) => {
-  const safeName = typeof it.name === "string" ? it.name : "";
-  const safeAddr = typeof it.address === "string" ? it.address : "";
-  const safeWeb  = typeof it.website === "string" ? it.website : "";
 
-  const isYou = matchesTarget(it, {
-    place_id: resolved?.place_id,
-    name: resolved?.name,
-    website: resolved?.website,
-    phone: resolved?.phone
-  });
-
-  return (
-    <div key={i} style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 10, padding: "10px 12px", borderTop: i ? "1px solid #eef2f7" : "none", alignItems: "center" }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: 16, display: "flex", alignItems: "center", justifyContent: "center",
-        background: (() => { const r = it.rank; if (r == null) return "#ef4444"; if (r === 1) return "#f59e0b"; if (r <= 3) return "#22c55e"; if (r <= 10) return "#0ea5e9"; if (r <= 20) return "#a855f7"; return "#ef4444"; })(),
-        color: "#111", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,0,0,0.15)"
-      }}>
-        {it.rank ?? "–"}
-      </div>
-      <div>
-        <div style={{ fontWeight: 700, fontSize: 14, lineHeight: "18px" }}>
-          {safeName || "—"} {isYou ? <span style={{ marginLeft: 6, fontSize: 11, padding: "2px 6px", border: "1px solid #16a34a", color: "#16a34a", borderRadius: 999 }}>You</span> : null}
-        </div>
-        {safeAddr ? <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{safeAddr}</div> : null}
-        {(it.rating || it.rating_count || safeWeb) ? (
-          <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
-            {it.rating ? `★ ${it.rating} ` : ""}{it.rating_count ? `(${it.rating_count})` : ""}
-            {safeWeb ? <> • <span style={{ color: "#0ea5e9" }}>{safeWeb}</span></> : null}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-})}
-  // ---------- Poll ranks ----------
+  // Poll ranks
   useEffect(() => {
-    if (!ids.length) return;
+    if (!ids.length || !resolved?.place_id) return;
     let stop = false;
 
     async function tick() {
@@ -381,6 +454,8 @@ export default function Home() {
             target: {
               place_id: resolved?.place_id || undefined,
               name: resolved?.name || undefined,
+              website: resolved?.website || undefined,
+              phone: resolved?.phone || undefined,
             },
           }),
         });
@@ -406,17 +481,15 @@ export default function Home() {
     }
 
     tick();
-    return () => { stop = true; };
+    return () => {
+      stop = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids, resolved?.place_id]);
+  }, [ids, resolved?.place_id, resolved?.website, resolved?.phone]);
 
-  // ---------- UI helpers ----------
+  // UI helpers
   const field = { width: "100%", padding: 8, border: "1px solid #d1d5db", borderRadius: 8 };
-
-  // Distance dropdown (miles -> meters)
-  const mileOptions = [
-    0.1, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
-  ];
+  const mileOptions = [0.1, 0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   const milesToMeters = (mi) => mi * 1609.344;
 
   return (
@@ -436,21 +509,29 @@ export default function Home() {
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Find your listing using Google:</div>
             <input
               ref={placeInputRef}
-              onInput={onPlaceInput} // fallback predictions if widget blocked
+              onInput={onPlaceInput}
               placeholder="Start typing your business name…"
               style={field}
             />
-            {/* Fallback predictions dropdown (only shows if widget didn't attach) */}
             {predOpen && preds.length > 0 && !autoRef.current ? (
-              <div style={{
-                position: "relative", zIndex: 10, marginTop: 4,
-                border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff",
-                boxShadow: "0 6px 18px rgba(0,0,0,0.08)"
-              }}>
-                {preds.map(p => (
+              <div
+                style={{
+                  position: "relative",
+                  zIndex: 10,
+                  marginTop: 4,
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 8,
+                  background: "#fff",
+                  boxShadow: "0 6px 18px rgba(0,0,0,0.08)",
+                }}
+              >
+                {preds.map((p) => (
                   <div
                     key={p.place_id}
-                    onMouseDown={(e) => { e.preventDefault(); pickPrediction(p); }}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pickPrediction(p);
+                    }}
                     style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14, borderTop: "1px solid #eef2f7" }}
                   >
                     {p.structured_formatting?.main_text || p.description}
@@ -464,8 +545,8 @@ export default function Home() {
 
             {resolved ? (
               <div style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>
-                Selected: <b>{resolved.name}</b>
-                {resolved.address ? <> — {resolved.address}</> : null}
+                Selected: <b>{typeof resolved.name === "string" ? resolved.name : ""}</b>
+                {typeof resolved.address === "string" && resolved.address ? <> — {resolved.address}</> : null}
               </div>
             ) : (
               <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
@@ -477,21 +558,23 @@ export default function Home() {
           {/* Map Criteria */}
           <div style={{ marginTop: 14 }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Map Criteria</div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
+              <div>
                 <label>Distance between Grid Points:</label>
                 <select
                   value={(spacingM / 1609.344).toString()}
                   onChange={(e) => setSpacingM(milesToMeters(parseFloat(e.target.value)))}
                   style={field}
                 >
-                  {mileOptions.map(mi => (
-                    <option key={mi} value={mi}>{mi} miles</option>
+                  {mileOptions.map((mi) => (
+                    <option key={mi} value={mi}>
+                      {mi} miles
+                    </option>
                   ))}
                 </select>
               </div>
 
-              <div style={{ gridColumn: "1 / -1" }}>
+              <div>
                 <label>Grid size template:</label>
                 <select
                   value={gridSize}
@@ -506,18 +589,31 @@ export default function Home() {
             </div>
           </div>
 
-          {/* Add Keyword */}
+          {/* Add Keyword + Start */}
           <form onSubmit={startGrid} style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 14 }}>
             <div>
               <label>Add Keyword</label>
-              <input value={keyword} onChange={e => setKeyword(e.target.value)} style={field} placeholder="e.g., plumber" />
+              <input
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+                style={field}
+                placeholder="e.g., plumber"
+              />
             </div>
 
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
                 type="submit"
-                disabled={loading}
-                style={{ background: "#47943b", color: "#fff", border: 0, borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontWeight: 700 }}
+                disabled={loading || !resolved?.place_id}
+                style={{
+                  background: "#47943b",
+                  color: "#fff",
+                  border: 0,
+                  borderRadius: 10,
+                  padding: "10px 14px",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                }}
               >
                 {loading ? "Working…" : "Start Grid"}
               </button>
@@ -531,60 +627,207 @@ export default function Home() {
           <div style={{ marginTop: 16, fontSize: 13, color: "#334155" }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Legend</div>
             <div style={{ display: "grid", gridTemplateColumns: "18px 1fr", gap: 8, alignItems: "center" }}>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#f59e0b", display: "inline-block" }}></span><span>#1</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#22c55e", display: "inline-block" }}></span><span>#2–3</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#0ea5e9", display: "inline-block" }}></span><span>#4–10</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#a855f7", display: "inline-block" }}></span><span>#11–20</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#ef4444", display: "inline-block" }}></span><span>#21+ / Not found</span>
-              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#94a3b8", display: "inline-block" }}></span><span>Pending</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#f59e0b", display: "inline-block" }}></span>
+              <span>#1</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#22c55e", display: "inline-block" }}></span>
+              <span>#2–3</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#0ea5e9", display: "inline-block" }}></span>
+              <span>#4–10</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#a855f7", display: "inline-block" }}></span>
+              <span>#11–20</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#ef4444", display: "inline-block" }}></span>
+              <span>#21+ / Not found</span>
+              <span style={{ width: 14, height: 14, borderRadius: 8, background: "#94a3b8", display: "inline-block" }}></span>
+              <span>Pending</span>
             </div>
           </div>
 
-          {/* Competitor list panel */}
-          <div style={{ marginTop: 16 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div style={{ fontWeight: 700 }}>Competitors {selectedTaskId ? "(cell)" : "(center cell)"}</div>
-              {selectedTaskId ? (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(selectedTaskId)}&limit=20`);
-                      const jj = await rr.json();
-                      if (rr.ok && jj.ok) setTopItems(jj.items || []);
-                    } catch { /* ignore */ }
-                  }}
-                  style={{ fontSize: 12, background: "transparent", border: "1px solid #e5e7eb", borderRadius: 8, padding: "4px 8px", cursor: "pointer" }}
-                >
-                  Refresh
-                </button>
-              ) : null}
-            </div>
-
-            <div style={{ marginTop: 8, maxHeight: 320, overflowY: "auto", border: "1px solid #e5e7eb", borderRadius: 10 }}>
-              {topItems.length === 0 ? (
-                <div style={{ padding: 10, color: "#64748b", fontSize: 13 }}>Hover or click a dot to see that cell’s results.</div>
-              ) : topItems.map((it, i) => (
-                <div key={i} style={{ display: "grid", gridTemplateColumns: "36px 1fr", gap: 10, padding: "10px 12px", borderTop: i ? "1px solid #eef2f7" : "none", alignItems: "center" }}>
-                  <div style={{
-                    width: 28, height: 28, borderRadius: 16, display: "flex", alignItems: "center", justifyContent: "center",
-                    background: (() => { const r = it.rank; if (r == null) return "#ef4444"; if (r === 1) return "#f59e0b"; if (r <= 3) return "#22c55e"; if (r <= 10) return "#0ea5e9"; if (r <= 20) return "#a855f7"; return "#ef4444"; })(),
-                    color: "#111", fontWeight: 700, fontSize: 12, border: "1px solid rgba(0,0,0,0.15)"
-                  }}>
-                    {it.rank ?? "–"}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 14, lineHeight: "18px" }}>{it.name || "—"}</div>
-                    <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{it.address || ""}</div>
-                    <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
-                      {it.rating ? `★ ${it.rating} ` : ""}{it.rating_count ? `(${it.rating_count})` : ""}
-                      {it.website ? <> • <span style={{ color: "#0ea5e9" }}>{String(it.website)}</span></> : null}
-                    </div>
-                  </div>
+          {/* Competitor list panel (hidden until first scan) */}
+          {ids.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ fontWeight: 700 }}>
+                  Competitors {selectedTaskId ? "(cell)" : "(center cell)"}
                 </div>
-              ))}
+                <div style={{ display: "flex", gap: 8 }}>
+                  {selectedTaskId ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const rr = await fetch(
+                            `/api/maps-grid/top?id=${encodeURIComponent(selectedTaskId)}&limit=20`
+                          );
+                          const jj = await rr.json();
+                          if (rr.ok && jj.ok) {
+                            const items = jj.items || [];
+                            const top3 = items.slice(0, 3);
+                            while (top3.length < 3) top3.push({ rank: null, name: "—", address: "" });
+                            setTopItems(top3);
+                          }
+                        } catch {
+                          /* ignore */
+                        }
+                      }}
+                      style={{
+                        fontSize: 12,
+                        background: "transparent",
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 8,
+                        padding: "4px 8px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Refresh
+                    </button>
+                  ) : null}
+
+                  {/* Export CSV */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rows = [["Rank", "Name", "Address", "Rating", "Rating Count", "Website"]];
+                      (topItems || []).forEach((it) => {
+                        rows.push([
+                          it.rank ?? "",
+                          typeof it.name === "string" ? it.name : "",
+                          typeof it.address === "string" ? it.address : "",
+                          it.rating ?? "",
+                          it.rating_count ?? "",
+                          typeof it.website === "string" ? it.website : "",
+                        ]);
+                      });
+                      const csv = rows
+                        .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","))
+                        .join("\n");
+                      const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = "competitors.csv";
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    style={{
+                      fontSize: 12,
+                      background: "transparent",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: 8,
+                      padding: "4px 8px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Export CSV
+                  </button>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 8,
+                  maxHeight: 320,
+                  overflowY: "auto",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 10,
+                }}
+              >
+                {topItems.length === 0 ? (
+                  <div style={{ padding: 10, color: "#64748b", fontSize: 13 }}>
+                    Hover or click a dot to see that cell’s results.
+                  </div>
+                ) : (
+                  topItems.map((it, i) => {
+                    const safeName = typeof it.name === "string" ? it.name : "";
+                    const safeAddr = typeof it.address === "string" ? it.address : "";
+                    const safeWeb = typeof it.website === "string" ? it.website : "";
+                    const isYou = matchesTarget(it, {
+                      place_id: resolved?.place_id,
+                      name: resolved?.name,
+                      website: resolved?.website,
+                      phone: resolved?.phone,
+                    });
+                    const bg =
+                      it.rank == null
+                        ? "#ef4444"
+                        : it.rank === 1
+                        ? "#f59e0b"
+                        : it.rank <= 3
+                        ? "#22c55e"
+                        : it.rank <= 10
+                        ? "#0ea5e9"
+                        : it.rank <= 20
+                        ? "#a855f7"
+                        : "#ef4444";
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "36px 1fr",
+                          gap: 10,
+                          padding: "10px 12px",
+                          borderTop: i ? "1px solid #eef2f7" : "none",
+                          alignItems: "center",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: 16,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            background: bg,
+                            color: "#111",
+                            fontWeight: 700,
+                            fontSize: 12,
+                            border: "1px solid rgba(0,0,0,0.15)",
+                          }}
+                        >
+                          {it.rank ?? "–"}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 14, lineHeight: "18px" }}>
+                            {safeName || "—"}{" "}
+                            {isYou ? (
+                              <span
+                                style={{
+                                  marginLeft: 6,
+                                  fontSize: 11,
+                                  padding: "2px 6px",
+                                  border: "1px solid #16a34a",
+                                  color: "#16a34a",
+                                  borderRadius: 999,
+                                }}
+                              >
+                                You
+                              </span>
+                            ) : null}
+                          </div>
+                          {safeAddr ? (
+                            <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>{safeAddr}</div>
+                          ) : null}
+                          {it.rating || it.rating_count || safeWeb ? (
+                            <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>
+                              {it.rating ? `★ ${it.rating} ` : ""}
+                              {it.rating_count ? `(${it.rating_count})` : ""}
+                              {safeWeb ? (
+                                <>
+                                  {" "}
+                                  • <span style={{ color: "#0ea5e9" }}>{safeWeb}</span>
+                                </>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </aside>
 
         {/* Map */}
