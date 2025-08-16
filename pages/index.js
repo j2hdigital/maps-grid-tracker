@@ -3,9 +3,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Head from "next/head";
 
 export default function Home() {
-  // ---------- Business selection (via Places Autocomplete) ----------
-  const placeInputRef = useRef(null);
-  const autoRef = useRef(null); // Autocomplete instance
+  // ---------- Google Maps / Places readiness ----------
+  const [mapsReady, setMapsReady] = useState(false);
+
+  // ---------- Business selection ----------
+  const placeInputRef = useRef(null);     // <input> element
+  const autoRef = useRef(null);           // Autocomplete widget (if available)
+  const acServiceRef = useRef(null);      // Fallback AutocompleteService
+  const placeServiceRef = useRef(null);   // Fallback PlacesService
+  const [preds, setPreds] = useState([]); // Fallback predictions list
+  const [predOpen, setPredOpen] = useState(false);
   const [resolved, setResolved] = useState(null); // { place_id, name, address, lat, lng }
   const [snapToBusiness, setSnapToBusiness] = useState(true);
 
@@ -25,15 +32,6 @@ export default function Home() {
   const [ranks, setRanks] = useState({});
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
-  // under your other useState/useRef:
-const [mapsReady, setMapsReady] = useState(false); // you already added this earlier
-const placeInputRef = useRef(null);
-const autoRef = useRef(null);
-const acServiceRef = useRef(null);
-const placeServiceRef = useRef(null);
-const [preds, setPreds] = useState([]);     // prediction list for fallback
-const [predOpen, setPredOpen] = useState(false);
-
 
   // ---------- Competitor list panel ----------
   const [topItems, setTopItems] = useState([]);
@@ -44,20 +42,28 @@ const [predOpen, setPredOpen] = useState(false);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
 
-  // Load Google Maps JS (with Places library) on the client
+  // ---------- Load Google Maps JS (with Places library) ----------
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (window.google?.maps) return; // already loaded
+    if (window.google?.maps) { setMapsReady(true); return; }
     const key = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+    if (!key) { console.warn("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY"); return; }
     const s = document.createElement("script");
     s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places`;
     s.async = true;
+    s.onerror = () => console.error("Failed to load Google Maps script");
+    s.onload = () => {
+      if (window.google?.maps) setMapsReady(true);
+      else console.error("Google Maps loaded but window.google.maps is missing");
+    };
     document.head.appendChild(s);
   }, []);
 
-  // Init map once
+  // ---------- Init map once Google is ready ----------
   useEffect(() => {
-    if (!mapDiv.current || !window.google?.maps || mapRef.current) return;
+    if (!mapsReady) return;
+    if (!mapDiv.current || mapRef.current) return;
+
     mapRef.current = new window.google.maps.Map(mapDiv.current, {
       center: { lat: Number(centerLat), lng: Number(centerLng) },
       zoom: 12,
@@ -65,106 +71,103 @@ const [predOpen, setPredOpen] = useState(false);
       streetViewControl: false,
       fullscreenControl: false,
     });
-    // Nudge layout so map sizes correctly
+    // Ensure it renders after layout
     setTimeout(() => window.google?.maps?.event?.trigger(mapRef.current, "resize"), 300);
-  }, [centerLat, centerLng]);
 
-  // Re-center map if center changes
+    // Create fallback PlacesService bound to this map
+    if (window.google.maps.places?.PlacesService) {
+      placeServiceRef.current = new window.google.maps.places.PlacesService(mapRef.current);
+    }
+  }, [mapsReady]);
+
+  // ---------- Re-center map if center changes ----------
   useEffect(() => {
     if (mapRef.current) {
       mapRef.current.setCenter({ lat: Number(centerLat), lng: Number(centerLng) });
     }
   }, [centerLat, centerLng]);
 
-  // Wire Google Places Autocomplete to the input
- useEffect(() => {
-  if (!mapsReady) return;
-  const g = window.google.maps;
+  // ---------- Autocomplete widget + fallback services ----------
+  useEffect(() => {
+    if (!mapsReady) return;
+    const g = window.google.maps;
 
-  // Try the standard widget first
-  if (placeInputRef.current && g.places?.Autocomplete) {
-    const ac = new g.places.Autocomplete(placeInputRef.current, {
-      fields: ["place_id", "name", "geometry", "formatted_address"],
-      types: ["establishment"],
-    });
-    autoRef.current = ac;
-    ac.addListener("place_changed", () => {
-      const p = ac.getPlace();
-      if (!p || !p.place_id || !p.geometry) return;
-      const lat = p.geometry.location.lat();
-      const lng = p.geometry.location.lng();
-      setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || null, lat, lng });
-      if (snapToBusiness) {
-        setCenterLat(lat); setCenterLng(lng);
-        mapRef.current?.setCenter({ lat, lng });
-      }
-      setPreds([]); setPredOpen(false);
-      setDevice("desktop");
-    });
-  }
+    // Standard widget (shows Google's dropdown)
+    if (placeInputRef.current && g.places?.Autocomplete) {
+      const ac = new g.places.Autocomplete(placeInputRef.current, {
+        fields: ["place_id", "name", "geometry", "formatted_address"],
+        types: ["establishment"], // businesses
+      });
+      autoRef.current = ac;
 
-  // Always create fallback services too
-  if (g.places?.AutocompleteService) {
-    acServiceRef.current = new g.places.AutocompleteService();
-  }
-  if (mapRef.current && g.places?.PlacesService) {
-    placeServiceRef.current = new g.places.PlacesService(mapRef.current);
-  }
-}, [mapsReady, snapToBusiness]);
+      ac.addListener("place_changed", () => {
+        const p = ac.getPlace();
+        if (!p || !p.place_id || !p.geometry) return;
+        const lat = p.geometry.location.lat();
+        const lng = p.geometry.location.lng();
+        setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || null, lat, lng });
+        if (snapToBusiness) {
+          setCenterLat(lat); setCenterLng(lng);
+          mapRef.current?.setCenter({ lat, lng });
+        }
+        setPreds([]); setPredOpen(false);
+        setDevice("desktop");
+      });
+    }
 
+    // Fallback services (used if widget is unavailable or blocked)
+    if (g.places?.AutocompleteService) {
+      acServiceRef.current = new g.places.AutocompleteService();
+    }
+    if (!placeServiceRef.current && mapRef.current && g.places?.PlacesService) {
+      placeServiceRef.current = new g.places.PlacesService(mapRef.current);
+    }
+  }, [mapsReady, snapToBusiness]);
+
+  // ---------- Fallback: fetch predictions when typing (if widget didn't attach) ----------
   function onPlaceInput(e) {
-  const q = e.target.value || "";
-    <input
-  ref={placeInputRef}
-  onInput={onPlaceInput}               // <— add this
-  placeholder="Start typing business name…"
-  style={{ width:"100%", padding:8, border:"1px solid #d1d5db", borderRadius:8 }}
-/>
+    const q = e.target.value || "";
+    if (autoRef.current) return; // widget will handle its own dropdown
 
-  // If widget exists, let it do its thing (it shows Google’s native dropdown)
-  if (autoRef.current) return;
+    if (!acServiceRef.current) return;
+    if (q.length < 2) { setPreds([]); setPredOpen(false); return; }
 
-  // Otherwise, use fallback predictions list
-  if (!acServiceRef.current) return;
-  if (q.length < 2) { setPreds([]); setPredOpen(false); return; }
+    const center = mapRef.current?.getCenter();
+    const locationBias = center ? { location: center, radius: 10000 } : undefined;
 
-  // Optional: bias to current map center
-  const center = mapRef.current?.getCenter();
-  const locationBias = center ? { location: center, radius: 10000 } : undefined;
-
-  acServiceRef.current.getPlacePredictions(
-    { input: q, types: ["establishment"], ...locationBias && { locationBias } },
-    (res, status) => {
-      if (status !== window.google.maps.places.PlacesServiceStatus.OK || !res?.length) {
-        setPreds([]); setPredOpen(false); return;
+    acServiceRef.current.getPlacePredictions(
+      { input: q, types: ["establishment"], ...(locationBias ? { locationBias } : {}) },
+      (res, status) => {
+        if (status !== window.google.maps.places.PlacesServiceStatus.OK || !res?.length) {
+          setPreds([]); setPredOpen(false); return;
+        }
+        setPreds(res.slice(0, 8)); setPredOpen(true);
       }
-      setPreds(res.slice(0, 8)); setPredOpen(true);
-    }
-  );
-}
-function pickPrediction(pred) {
-  if (!placeServiceRef.current) return;
-  placeServiceRef.current.getDetails(
-    { placeId: pred.place_id, fields: ["place_id","name","geometry","formatted_address"] },
-    (p, status) => {
-      if (status !== window.google.maps.places.PlacesServiceStatus.OK || !p?.geometry) return;
-      const lat = p.geometry.location.lat();
-      const lng = p.geometry.location.lng();
-      setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || pred.description || null, lat, lng });
-      if (snapToBusiness) {
-        setCenterLat(lat); setCenterLng(lng);
-        mapRef.current?.setCenter({ lat, lng });
+    );
+  }
+
+  // ---------- Fallback: pick a prediction and resolve details ----------
+  function pickPrediction(pred) {
+    if (!placeServiceRef.current) return;
+    placeServiceRef.current.getDetails(
+      { placeId: pred.place_id, fields: ["place_id","name","geometry","formatted_address"] },
+      (p, status) => {
+        if (status !== window.google.maps.places.PlacesServiceStatus.OK || !p?.geometry) return;
+        const lat = p.geometry.location.lat();
+        const lng = p.geometry.location.lng();
+        setResolved({ place_id: p.place_id, name: p.name, address: p.formatted_address || pred.description || null, lat, lng });
+        if (snapToBusiness) {
+          setCenterLat(lat); setCenterLng(lng);
+          mapRef.current?.setCenter({ lat, lng });
+        }
+        if (placeInputRef.current) placeInputRef.current.value = p.name;
+        setPreds([]); setPredOpen(false);
+        setDevice("desktop");
       }
-      // set the input’s value visibly
-      if (placeInputRef.current) placeInputRef.current.value = p.name;
-      setPreds([]); setPredOpen(false);
-      setDevice("desktop");
-    }
-  );
-}
+    );
+  }
 
-
-  // Helper: color by rank
+  // ---------- Color helper ----------
   const colorFor = (rank) => {
     if (rank === "pending") return "#94a3b8"; // slate-400
     if (rank == null) return "#9ca3af";       // gray-400
@@ -174,14 +177,15 @@ function pickPrediction(pred) {
     return "#ef4444";                          // red-500
   };
 
-  // Draw markers whenever cells/ids/ranks change
+  // ---------- Prepare tiles ----------
   const tiles = useMemo(() => {
     if (!cells.length || !ids.length) return [];
     return cells.map((cell, idx) => ({ ...cell, id: ids[idx], rank: ranks[ids[idx]] }));
   }, [cells, ids, ranks]);
 
+  // ---------- Draw markers ----------
   useEffect(() => {
-    if (!mapRef.current || !window.google?.maps) return;
+    if (!mapsReady || !mapRef.current || !window.google?.maps) return;
     const g = window.google.maps;
 
     // Clear old markers
@@ -221,9 +225,7 @@ function pickPrediction(pred) {
           const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(taskId)}&limit=20`);
           const jj = await rr.json();
           if (rr.ok && jj.ok) setTopItems(jj.items || []);
-        } catch {
-          /* ignore */
-        }
+        } catch { /* ignore */ }
       };
       marker.addListener("mouseover", () => loadTopFor(t.id));
       marker.addListener("click", () => loadTopFor(t.id));
@@ -235,9 +237,9 @@ function pickPrediction(pred) {
     if (!bounds.isEmpty()) {
       mapRef.current.fitBounds(bounds, 60);
     }
-  }, [tiles]);
+  }, [tiles, mapsReady]);
 
-  // Start grid → create DFS tasks
+  // ---------- Start grid ----------
   async function startGrid(e) {
     e?.preventDefault?.();
     setLoading(true);
@@ -276,9 +278,7 @@ function pickPrediction(pred) {
           const rr = await fetch(`/api/maps-grid/top?id=${encodeURIComponent(centerId)}&limit=20`);
           const jj = await rr.json();
           if (rr.ok && jj.ok) setTopItems(jj.items || []);
-        } catch {
-          /* ignore */
-        }
+        } catch { /* ignore */ }
       }
     } catch (err) {
       alert(err.message);
@@ -286,7 +286,7 @@ function pickPrediction(pred) {
     }
   }
 
-  // Poll ranks → updates numbers/colors
+  // ---------- Poll ranks ----------
   useEffect(() => {
     if (!ids.length) return;
     let stop = false;
@@ -331,7 +331,7 @@ function pickPrediction(pred) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids, resolved?.place_id]);
 
-  // Use my location → center map & bias autocomplete
+  // ---------- Use my location ----------
   async function useMyLocation() {
     if (!navigator.geolocation) {
       alert("Geolocation not supported");
@@ -346,11 +346,9 @@ function pickPrediction(pred) {
         if (mapRef.current) {
           const g = window.google.maps;
           mapRef.current.setCenter({ lat, lng });
-          // Bias Autocomplete to ~10km radius around user
-          if (autoRef.current) {
-            const circle = new g.Circle({ center: { lat, lng }, radius: 10000 });
-            autoRef.current.setBounds(circle.getBounds());
-            // autoRef.current.setOptions({ strictBounds: true }); // enable if you want stricter results
+          // Bias fallback predictions to ~10km radius around user
+          if (acServiceRef.current && g.Circle && placeInputRef.current && !autoRef.current) {
+            // We already use locationBias when querying predictions; this just ensures center is up-to-date
           }
         }
       },
@@ -372,7 +370,7 @@ function pickPrediction(pred) {
         <aside style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Maps Grid Rank Tracker</h2>
           <p style={{ color: "#475569", marginTop: 6 }}>
-            Find your business via <b>Google Places Autocomplete</b>, then run the grid.
+            Find your business via <b>Google Places</b>, then run the grid.
           </p>
 
           {/* Find Business */}
@@ -380,9 +378,32 @@ function pickPrediction(pred) {
             <div style={{ fontWeight: 700, marginBottom: 6 }}>Find Business</div>
             <input
               ref={placeInputRef}
+              onInput={onPlaceInput} // fallback predictions if widget blocked
               placeholder="Start typing business name…"
               style={field}
             />
+            {/* Fallback predictions dropdown (only shows if widget didn't attach) */}
+            {predOpen && preds.length > 0 && !autoRef.current ? (
+              <div style={{
+                position: "relative", zIndex: 10, marginTop: 4,
+                border: "1px solid #e5e7eb", borderRadius: 8, background: "#fff",
+                boxShadow: "0 6px 18px rgba(0,0,0,0.08)"
+              }}>
+                {preds.map(p => (
+                  <div
+                    key={p.place_id}
+                    onMouseDown={(e) => { e.preventDefault(); pickPrediction(p); }}
+                    style={{ padding: "8px 10px", cursor: "pointer", fontSize: 14, borderTop: "1px solid #f1f5f9" }}
+                  >
+                    {p.structured_formatting?.main_text || p.description}
+                    <div style={{ fontSize: 12, color: "#64748b" }}>
+                      {p.structured_formatting?.secondary_text || ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             {resolved ? (
               <div style={{ fontSize: 12, color: "#475569", marginTop: 6 }}>
                 Selected: <b>{resolved.name}</b>
@@ -523,11 +544,10 @@ function pickPrediction(pred) {
         </aside>
 
         {/* Map */}
-        <main style={{ position: "relative" }}>
-          <div ref={mapDiv} style={{ position: "absolute", inset: 0 }} />
+        <main style={{ position: "relative", minHeight: "100vh" }}>
+          <div ref={mapDiv} style={{ position: "absolute", inset: 0, minHeight: "600px" }} />
         </main>
       </div>
     </>
   );
 }
-
